@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TestPlatform — IT Тестирование</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Inter','Segoe UI',system-ui,sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh;}
+::-webkit-scrollbar{width:6px;}
+::-webkit-scrollbar-track{background:#1a1d2e;}
+::-webkit-scrollbar-thumb{background:#3d4166;border-radius:99px;}
+@keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+@keyframes slideIn{from{opacity:0;transform:translateX(-20px)}to{opacity:1;transform:none}}
+@keyframes glow{0%,100%{box-shadow:0 0 20px rgba(99,102,241,.3)}50%{box-shadow:0 0 40px rgba(99,102,241,.6)}}
+.fade-up{animation:fadeUp .4s ease}
+.spin{animation:spin 1s linear infinite}
+input,textarea,select{outline:none;font-family:inherit;}
+button{font-family:inherit;cursor:pointer;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const{useState,useEffect,useRef,useCallback,useMemo}=React;
+
+// ═══════════════ CONSTANTS ═══════════════
+const API = '';
+const TOKEN_KEY = 'tp_token';
+const USER_KEY = 'tp_user';
+
+// IT-only quizzes seed data (загружаются если БД пустая)
+const SEED_QUIZZES = [
+  {title:"Python: основы и типы данных",category:"Python",emoji:"🐍",coverColor:"#3572A5",difficulty:"EASY",timerMinutes:15,passingScore:60,tags:["python","типы","основы"],
+   questions:[
+    {id:"1",text:"Какой тип данных у значения True?",type:"SINGLE_CHOICE",points:1,options:["str","int","bool","float"],correctAnswerIndices:[2]},
+    {id:"2",text:"Выберите изменяемые (mutable) типы данных:",type:"MULTIPLE_CHOICE",points:2,options:["list","tuple","dict","str"],correctAnswerIndices:[0,2]},
+    {id:"3",text:"Python — интерпретируемый язык?",type:"TRUE_FALSE",points:1,options:["Верно","Неверно"],correctAnswerIndices:[0]},
+    {id:"4",text:"Что выведет print(type(3.14))?",type:"SINGLE_CHOICE",points:1,options:["<class 'int'>","<class 'float'>","<class 'double'>","<class 'number'>"],correctAnswerIndices:[1]},
+    {id:"5",text:"Как объявить список в Python?",type:"SINGLE_CHOICE",points:1,options:["list = {}","list = ()","list = []","list = <>"],correctAnswerIndices:[2]},
+   ]},
+  {title:"JavaScript: ES6+",category:"JavaScript",emoji:"🟨",coverColor:"#f7df1e",difficulty:"MEDIUM",timerMinutes:20,passingScore:65,tags:["javascript","es6","frontend"],
+   questions:[
+    {id:"1",text:"Что такое стрелочная функция?",type:"SINGLE_CHOICE",points:1,options:["Обычная функция","Сокращённый синтаксис функции","Асинхронная функция","Функция-генератор"],correctAnswerIndices:[1]},
+    {id:"2",text:"Выберите методы массива ES6+:",type:"MULTIPLE_CHOICE",points:2,options:["map","find","filter","forEach"],correctAnswerIndices:[0,1,2,3]},
+    {id:"3",text:"let и const имеют блочную область видимости?",type:"TRUE_FALSE",points:1,options:["Верно","Неверно"],correctAnswerIndices:[0]},
+    {id:"4",text:"Что возвращает Promise.all() если один промис отклонён?",type:"SINGLE_CHOICE",points:2,options:["Первый успешный","Отклоняется сразу","Ждёт остальных","undefined"],correctAnswerIndices:[1]},
+   ]},
+  {title:"Алгоритмы и структуры данных",category:"Алгоритмы",emoji:"📊",coverColor:"#7C3AED",difficulty:"HARD",timerMinutes:25,passingScore:70,tags:["алгоритмы","сложность","структуры"],
+   questions:[
+    {id:"1",text:"Сложность бинарного поиска?",type:"SINGLE_CHOICE",points:2,options:["O(n)","O(log n)","O(n²)","O(1)"],correctAnswerIndices:[1]},
+    {id:"2",text:"Какие структуры данных используют LIFO?",type:"MULTIPLE_CHOICE",points:2,options:["Stack","Queue","Стек вызовов","Очередь"],correctAnswerIndices:[0,2]},
+    {id:"3",text:"Быстрая сортировка имеет O(n log n) в среднем?",type:"TRUE_FALSE",points:1,options:["Верно","Неверно"],correctAnswerIndices:[0]},
+    {id:"4",text:"В чём разница между BFS и DFS?",type:"SINGLE_CHOICE",points:3,options:["Нет разницы","BFS в ширину, DFS в глубину","BFS быстрее","DFS для деревьев"],correctAnswerIndices:[1]},
+   ]},
+  {title:"SQL и базы данных",category:"Базы данных",emoji:"🗄️",coverColor:"#0ea5e9",difficulty:"MEDIUM",timerMinutes:20,passingScore:65,tags:["sql","база данных","запросы"],
+   questions:[
+    {id:"1",text:"Что делает оператор JOIN?",type:"SINGLE_CHOICE",points:1,options:["Удаляет строки","Объединяет таблицы","Создаёт индекс","Копирует данные"],correctAnswerIndices:[1]},
+    {id:"2",text:"Выберите агрегатные функции SQL:",type:"MULTIPLE_CHOICE",points:2,options:["COUNT","SUM","MAX","SELECT"],correctAnswerIndices:[0,1,2]},
+    {id:"3",text:"PRIMARY KEY может содержать NULL значения?",type:"TRUE_FALSE",points:1,options:["Верно","Неверно"],correctAnswerIndices:[1]},
+    {id:"4",text:"Разница между INNER и LEFT JOIN?",type:"SINGLE_CHOICE",points:2,options:["Нет разницы","INNER — только совпадения, LEFT — все из левой","LEFT быстрее","INNER для больших таблиц"],correctAnswerIndices:[1]},
+   ]},
+  {title:"Git и контроль версий",category:"DevOps",emoji:"🌿",coverColor:"#f05032",difficulty:"EASY",timerMinutes:15,passingScore:60,tags:["git","vcs","devops"],
+   questions:[
+    {id:"1",text:"Что делает git commit?",type:"SINGLE_CHOICE",points:1,options:["Отправляет код на сервер","Сохраняет снимок изменений","Создаёт ветку","Удаляет файлы"],correctAnswerIndices:[1]},
+    {id:"2",text:"Выберите команды для работы с ветками:",type:"MULTIPLE_CHOICE",points:2,options:["git branch","git checkout","git merge","git push"],correctAnswerIndices:[0,1,2]},
+    {id:"3",text:"git pull = git fetch + git merge?",type:"TRUE_FALSE",points:1,options:["Верно","Неверно"],correctAnswerIndices:[0]},
+   ]},
+  {title:"Docker и контейнеризация",category:"DevOps",emoji:"🐳",coverColor:"#2496ed",difficulty:"MEDIUM",timerMinutes:20,passingScore:65,tags:["docker","контейнеры","devops"],
+   questions:[
+    {id:"1",text:"Что такое Docker image?",type:"SINGLE_CHOICE",points:1,options:["Запущенный контейнер","Шаблон для контейнера","Файл конфигурации","Виртуальная машина"],correctAnswerIndices:[1]},
+    {id:"2",text:"Выберите верные утверждения о Docker:",type:"MULTIPLE_CHOICE",points:2,options:["Контейнеры изолированы","Docker использует ядро хоста","Каждый контейнер — полная ОС","Dockerfile описывает образ"],correctAnswerIndices:[0,1,3]},
+    {id:"3",text:"Docker Compose управляет несколькими контейнерами?",type:"TRUE_FALSE",points:1,options:["Верно","Неверно"],correctAnswerIndices:[0]},
+   ]},
+  {title:"React и компонентный подход",category:"Frontend",emoji:"⚛️",coverColor:"#61dafb",difficulty:"MEDIUM",timerMinutes:20,passingScore:65,tags:["react","frontend","jsx"],
+   questions:[
+    {id:"1",text:"Что такое useState в React?",type:"SINGLE_CHOICE",points:1,options:["Хук для состояния","CSS-in-JS","Роутер","Контекст"],correctAnswerIndices:[0]},
+    {id:"2",text:"Выберите хуки React:",type:"MULTIPLE_CHOICE",points:2,options:["useState","useEffect","useCallback","useRouter"],correctAnswerIndices:[0,1,2]},
+    {id:"3",text:"Virtual DOM быстрее реального DOM?",type:"TRUE_FALSE",points:1,options:["Верно","Неверно"],correctAnswerIndices:[0]},
+    {id:"4",text:"Когда срабатывает useEffect с пустым []?",type:"SINGLE_CHOICE",points:2,options:["При каждом рендере","Только при монтировании","Только при размонтировании","Никогда"],correctAnswerIndices:[1]},
+   ]},
+  {title:"Сети и протоколы (HTTP/TCP)",category:"Сети",emoji:"🌐",coverColor:"#10b981",difficulty:"HARD",timerMinutes:25,passingScore:70,tags:["http","tcp","сети","протоколы"],
+   questions:[
+    {id:"1",text:"Что означает статус HTTP 404?",type:"SINGLE_CHOICE",points:1,options:["Успех","Не найдено","Ошибка сервера","Перенаправление"],correctAnswerIndices:[1]},
+    {id:"2",text:"Выберите методы HTTP:",type:"MULTIPLE_CHOICE",points:2,options:["GET","POST","PUT","SEND"],correctAnswerIndices:[0,1,2]},
+    {id:"3",text:"HTTPS шифрует данные с помощью TLS?",type:"TRUE_FALSE",points:1,options:["Верно","Неверно"],correctAnswerIndices:[0]},
+    {id:"4",text:"В чём разница TCP и UDP?",type:"SINGLE_CHOICE",points:3,options:["Нет разницы","TCP надёжный, UDP быстрый без гарантий","UDP надёжнее","TCP быстрее"],correctAnswerIndices:[1]},
+   ]},
+];
+
+// ═══════════════ API HELPERS ═══════════════
+async function apiCall(method, path, body=null){
+  const token = localStorage.getItem(TOKEN_KEY);
+  const opts = {
+    method,
+    headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},
+  };
+  if(body) opts.body = JSON.stringify(body);
+  const res = await fetch(API+path, opts);
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.error||'Ошибка сервера');
+  return data;
+}
+
+// ═══════════════ COLORS & CONFIG ═══════════════
+const DIFF = {
+  EASY:{label:"Лёгкий",color:"#10b981",bg:"rgba(16,185,129,.15)",dot:"🟢"},
+  MEDIUM:{label:"Средний",color:"#f59e0b",bg:"rgba(245,158,11,.15)",dot:"🟡"},
+  HARD:{label:"Сложный",color:"#ef4444",bg:"rgba(239,68,68,.15)",dot:"🔴"},
+  EXPERT:{label:"Эксперт",color:"#8b5cf6",bg:"rgba(139,92,246,.15)",dot:"🟣"},
+};
+const CATEGORIES = ["Все","Python","JavaScript","Алгоритмы","Базы данных","DevOps","Frontend","Сети","Java","C++","Кибербезопасность"];
+
+// ═══════════════ SMALL COMPONENTS ═══════════════
+function Spinner(){return <div className="spin" style={{width:24,height:24,border:"3px solid rgba(99,102,241,.3)",borderTopColor:"#6366f1",borderRadius:"50%"}}/>;}
+
+function Badge({label,color="#6366f1",bg="rgba(99,102,241,.15)",emoji}){
+  return <span style={{display:"inline-flex",alignItems:"center",gap:4,background:bg,color,borderRadius:99,padding:"3px 10px",fontSize:12,fontWeight:600}}>{emoji&&<span>{emoji}</span>}{label}</span>;
+}
+
+function Avatar({user,size=40}){
+  const colors=["#6366f1","#8b5cf6","#ec4899","#f59e0b","#10b981","#3b82f6"];
+  const bg=colors[Math.abs((user?.name||"").charCodeAt(0)||0)%colors.length];
+  return <div style={{width:size,height:size,borderRadius:"50%",background:`linear-gradient(135deg,${bg},${bg}99)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:size*.42,flexShrink:0,boxShadow:`0 2px 12px ${bg}44`}}>{user?.avatarEmoji||"👤"}</div>;
+}
+
+function GlassCard({children,style={},onClick}){
+  return <div onClick={onClick} style={{background:"rgba(255,255,255,.04)",backdropFilter:"blur(12px)",border:"1px solid rgba(255,255,255,.08)",borderRadius:16,...style}}>{children}</div>;
+}
+
+function Btn({children,onClick,color="#6366f1",outline=false,disabled=false,style={},size="md"}){
+  const pad=size==="sm"?"8px 14px":size==="lg"?"14px 28px":"11px 20px";
+  const fs=size==="sm"?13:size==="lg"?16:14;
+  return <button onClick={onClick} disabled={disabled}
+    style={{background:outline?"transparent":color,color:outline?color:"#fff",border:`2px solid ${color}`,borderRadius:12,padding:pad,fontSize:fs,fontWeight:700,cursor:disabled?"not-allowed":"pointer",opacity:disabled?.6:1,transition:"all .2s",...style}}
+    onMouseEnter={e=>{if(!disabled&&!outline)e.target.style.filter="brightness(1.1)";}}
+    onMouseLeave={e=>{e.target.style.filter="none";}}
+  >{children}</button>;
+}
+
+function Input({value,onChange,placeholder,type="text",style={}}){
+  return <input type={type} value={value} onChange={onChange} placeholder={placeholder}
+    style={{background:"rgba(255,255,255,.06)",border:"1px solid rgba(255,255,255,.12)",borderRadius:10,padding:"12px 16px",fontSize:14,color:"#e2e8f0",width:"100%","::placeholder":{color:"#64748b"},...style}}
+    onFocus={e=>e.target.style.borderColor="#6366f1"}
+    onBlur={e=>e.target.style.borderColor="rgba(255,255,255,.12)"}
+  />;
+}
+
+function Modal({children,onClose}){
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}} onClick={onClose}>
+    <div onClick={e=>e.stopPropagation()} style={{width:"100%",maxWidth:560,maxHeight:"90vh",overflowY:"auto"}}>
+      {children}
+    </div>
+  </div>;
+}
+
+// ═══════════════ AUTH PAGES ═══════════════
+function AuthPage({onAuth}){
+  const[tab,setTab]=useState("login");
+  const[name,setName]=useState("");
+  const[email,setEmail]=useState("");
+  const[password,setPassword]=useState("");
+  const[error,setError]=useState("");
+  const[loading,setLoading]=useState(false);
+
+  async function submit(){
+    setError(""); setLoading(true);
+    try{
+      let data;
+      if(tab==="login"){
+        data=await apiCall("POST","/api/auth/login",{email,password});
+      } else {
+        data=await apiCall("POST","/api/auth/register",{name,email,password});
+      }
+      localStorage.setItem(TOKEN_KEY,data.token);
+      localStorage.setItem(USER_KEY,JSON.stringify(data.user));
+      onAuth(data.user);
+    }catch(e){setError(e.message);}
+    setLoading(false);
+  }
+
+  // Симуляция Google OAuth (в реальном проекте нужен Google Client ID)
+  async function googleLogin(){
+    setError(""); setLoading(true);
+    try{
+      // Эмулируем Google OAuth ответ
+      const fakeGoogle={googleId:"google_"+Date.now(),email:email||"demo@gmail.com",name:name||"Google Пользователь"};
+      const data=await apiCall("POST","/api/auth/google",fakeGoogle);
+      localStorage.setItem(TOKEN_KEY,data.token);
+      localStorage.setItem(USER_KEY,JSON.stringify(data.user));
+      onAuth(data.user);
+    }catch(e){setError(e.message);}
+    setLoading(false);
+  }
+
+  return(
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:20,background:"radial-gradient(ellipse at 20% 50%, rgba(99,102,241,.15) 0%, transparent 60%), radial-gradient(ellipse at 80% 20%, rgba(139,92,246,.12) 0%, transparent 50%), #0f1117"}}>
+      <div style={{width:"100%",maxWidth:420,animation:"fadeUp .5s ease"}}>
+        {/* Logo */}
+        <div style={{textAlign:"center",marginBottom:32}}>
+          <div style={{fontSize:52,marginBottom:8}}>⚡</div>
+          <h1 style={{fontSize:28,fontWeight:900,background:"linear-gradient(135deg,#6366f1,#8b5cf6)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>TestPlatform</h1>
+          <p style={{color:"#64748b",marginTop:4,fontSize:14}}>IT-тестирование нового поколения</p>
+        </div>
+
+        <GlassCard style={{padding:32}}>
+          {/* Tabs */}
+          <div style={{display:"flex",background:"rgba(255,255,255,.05)",borderRadius:12,padding:4,marginBottom:28}}>
+            {["login","register"].map(t=>(
+              <button key={t} onClick={()=>setTab(t)}
+                style={{flex:1,padding:"10px",borderRadius:10,border:"none",background:tab===t?"rgba(99,102,241,.8)":"transparent",color:tab===t?"#fff":"#94a3b8",fontWeight:700,fontSize:14,cursor:"pointer",transition:"all .2s"}}>
+                {t==="login"?"Вход":"Регистрация"}
+              </button>
+            ))}
+          </div>
+
+          <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            {tab==="register"&&<Input value={name} onChange={e=>setName(e.target.value)} placeholder="Ваше имя"/>}
+            <Input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" type="email"/>
+            <Input value={password} onChange={e=>setPassword(e.target.value)} placeholder="Пароль" type="password"/>
+
+            {error&&<div style={{background:"rgba(239,68,68,.15)",border:"1px solid rgba(239,68,68,.3)",borderRadius:10,padding:"10px 14px",color:"#fca5a5",fontSize:13}}>{error}</div>}
+
+            <Btn onClick={submit} disabled={loading} size="lg" style={{marginTop:4}}>
+              {loading?<span style={{display:"flex",alignItems:"center",gap:8,justifyContent:"center"}}><Spinner/> Загрузка...</span>:(tab==="login"?"Войти":"Создать аккаунт")}
+            </Btn>
+
+            <div style={{display:"flex",alignItems:"center",gap:12,color:"#334155",fontSize:13}}>
+              <div style={{flex:1,height:1,background:"rgba(255,255,255,.1)"}}/>или<div style={{flex:1,height:1,background:"rgba(255,255,255,.1)"}}/>
+            </div>
+
+            <button onClick={googleLogin} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10,background:"#fff",color:"#1e293b",border:"none",borderRadius:12,padding:"12px",fontSize:14,fontWeight:700,cursor:"pointer",transition:"all .2s"}}
+              onMouseEnter={e=>e.currentTarget.style.background="#f1f5f9"}
+              onMouseLeave={e=>e.currentTarget.style.background="#fff"}>
+              <svg width="20" height="20" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+              Войти через Google
+            </button>
+          </div>
+        </GlassCard>
+        <p style={{textAlign:"center",marginTop:16,color:"#334155",fontSize:12}}>Только IT и программирование • 8+ категорий</p>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════ QUIZ CARD ═══════════════
+function QuizCard({quiz,onStart,onEdit,isOwner}){
+  const d=DIFF[quiz.difficulty]||DIFF.MEDIUM;
+  const qs=Array.isArray(quiz.questions)?quiz.questions:[];
+  const[hov,setHov]=useState(false);
+  return(
+    <div onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+      style={{background:"rgba(255,255,255,.04)",border:`1px solid ${hov?"rgba(99,102,241,.4)":"rgba(255,255,255,.06)"}`,borderRadius:18,overflow:"hidden",transition:"all .25s",transform:hov?"translateY(-3px)":"none",boxShadow:hov?"0 12px 40px rgba(0,0,0,.3)":"none",animation:"fadeUp .4s ease"}}>
+      {/* Cover */}
+      <div style={{height:80,background:quiz.coverColor||"#6366f1",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 18px",position:"relative",overflow:"hidden"}}>
+        <div style={{position:"absolute",right:-10,top:-15,fontSize:70,opacity:.15}}>{quiz.emoji}</div>
+        <span style={{fontSize:28}}>{quiz.emoji}</span>
+        <span style={{background:"rgba(0,0,0,.3)",color:"rgba(255,255,255,.9)",borderRadius:99,padding:"2px 10px",fontSize:11,fontWeight:700,backdropFilter:"blur(8px)"}}>{quiz.category}</span>
+      </div>
+      {/* Body */}
+      <div style={{padding:16}}>
+        <div style={{fontWeight:700,fontSize:15,color:"#f1f5f9",marginBottom:8,lineHeight:1.4}}>{quiz.title}</div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
+          <Badge label={d.label} color={d.color} bg={d.bg} emoji={d.dot}/>
+          <Badge label={`${qs.length} вопр.`} color="#94a3b8" bg="rgba(148,163,184,.1)"/>
+          <Badge label={`${quiz.timerMinutes} мин`} color="#94a3b8" bg="rgba(148,163,184,.1)"/>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <Btn onClick={()=>onStart(quiz)} style={{flex:1,textAlign:"center"}} size="sm">▶ Начать</Btn>
+          {isOwner&&<Btn onClick={()=>onEdit(quiz)} outline size="sm" style={{flex:1,textAlign:"center"}}>✏️ Изменить</Btn>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════ QUIZ SESSION ═══════════════
+function QuizSession({quiz,onFinish,onExit}){
+  const qs=Array.isArray(quiz.questions)?quiz.questions:[];
+  const[idx,setIdx]=useState(0);
+  const[answers,setAnswers]=useState({});
+  const[timeLeft,setTimeLeft]=useState((quiz.timerMinutes||20)*60);
+  const[finished,setFinished]=useState(false);
+
+  useEffect(()=>{
+    if(finished) return;
+    const t=setInterval(()=>setTimeLeft(s=>{if(s<=1){clearInterval(t);handleFinish();return 0;}return s-1;}),1000);
+    return()=>clearInterval(t);
+  },[finished]);
+
+  function handleAnswer(qId,idx){
+    setAnswers(a=>({...a,[qId]:idx}));
+  }
+  function handleMulti(qId,idx){
+    setAnswers(a=>{const cur=a[qId]||[];return{...a,[qId]:cur.includes(idx)?cur.filter(i=>i!==idx):[...cur,idx]};});
+  }
+  function handleText(qId,val){setAnswers(a=>({...a,[qId]:val}));}
+
+  function handleFinish(){
+    setFinished(true);
+    let correct=0,total=0;
+    qs.forEach(q=>{
+      const pts=q.points||1;
+      total+=pts;
+      const a=answers[q.id];
+      if(q.type==="SINGLE_CHOICE"&&a===q.correctAnswerIndices?.[0]) correct+=pts;
+      else if(q.type==="TRUE_FALSE"&&a===q.correctAnswerIndices?.[0]) correct+=pts;
+      else if(q.type==="MULTIPLE_CHOICE"){
+        const sel=Array.isArray(a)?[...a].sort():[];
+        const exp=[...(q.correctAnswerIndices||[])].sort();
+        if(JSON.stringify(sel)===JSON.stringify(exp)) correct+=pts;
+      } else if(q.type==="OPEN_TEXT"&&typeof a==="string"&&a.trim().toLowerCase()===q.correctTextAnswer?.toLowerCase()) correct+=pts;
+    });
+    const score=total>0?Math.round(correct/total*100):0;
+    onFinish({score,correct,total,timeSpent:(quiz.timerMinutes||20)*60-timeLeft});
+  }
+
+  if(finished) return <div style={{textAlign:"center",padding:60}}><Spinner/></div>;
+
+  const q=qs[idx];
+  const mm=Math.floor(timeLeft/60),ss=String(timeLeft%60).padStart(2,"0");
+  const progress=(idx+1)/qs.length*100;
+
+  return(
+    <div style={{maxWidth:680,margin:"0 auto",padding:20}}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+        <div>
+          <div style={{color:"#6366f1",fontWeight:700,fontSize:13}}>Вопрос {idx+1} из {qs.length}</div>
+          <div style={{color:"#94a3b8",fontSize:13}}>{quiz.title}</div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <div style={{background:timeLeft<60?"rgba(239,68,68,.2)":"rgba(99,102,241,.2)",border:`1px solid ${timeLeft<60?"rgba(239,68,68,.4)":"rgba(99,102,241,.3)"}`,borderRadius:99,padding:"6px 14px",color:timeLeft<60?"#fca5a5":"#a5b4fc",fontWeight:700,fontSize:14}}>⏱ {mm}:{ss}</div>
+          <Btn onClick={onExit} outline size="sm" color="#64748b">✕</Btn>
+        </div>
+      </div>
+      {/* Progress */}
+      <div style={{background:"rgba(255,255,255,.06)",borderRadius:99,height:6,marginBottom:24}}>
+        <div style={{width:`${progress}%`,height:"100%",background:"linear-gradient(90deg,#6366f1,#8b5cf6)",borderRadius:99,transition:"width .4s ease"}}/>
+      </div>
+
+      <GlassCard style={{padding:28}}>
+        <div style={{fontWeight:700,fontSize:18,color:"#f1f5f9",marginBottom:24,lineHeight:1.5}}>{q?.text}</div>
+
+        {(q?.type==="SINGLE_CHOICE"||q?.type==="TRUE_FALSE")&&(q?.options||[]).map((opt,i)=>(
+          <div key={i} onClick={()=>handleAnswer(q.id,i)}
+            style={{border:`2px solid ${answers[q.id]===i?"#6366f1":"rgba(255,255,255,.08)"}`,background:answers[q.id]===i?"rgba(99,102,241,.15)":"rgba(255,255,255,.03)",borderRadius:12,padding:"14px 18px",marginBottom:10,cursor:"pointer",transition:"all .15s",color:answers[q.id]===i?"#a5b4fc":"#cbd5e1",display:"flex",alignItems:"center",gap:12}}>
+            <div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${answers[q.id]===i?"#6366f1":"rgba(255,255,255,.2)"}`,background:answers[q.id]===i?"#6366f1":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              {answers[q.id]===i&&<div style={{width:8,height:8,borderRadius:"50%",background:"#fff"}}/>}
+            </div>
+            {opt}
+          </div>
+        ))}
+
+        {q?.type==="MULTIPLE_CHOICE"&&(q?.options||[]).map((opt,i)=>{
+          const sel=(answers[q.id]||[]).includes(i);
+          return <div key={i} onClick={()=>handleMulti(q.id,i)}
+            style={{border:`2px solid ${sel?"#6366f1":"rgba(255,255,255,.08)"}`,background:sel?"rgba(99,102,241,.15)":"rgba(255,255,255,.03)",borderRadius:12,padding:"14px 18px",marginBottom:10,cursor:"pointer",transition:"all .15s",color:sel?"#a5b4fc":"#cbd5e1",display:"flex",alignItems:"center",gap:12}}>
+            <div style={{width:20,height:20,borderRadius:6,border:`2px solid ${sel?"#6366f1":"rgba(255,255,255,.2)"}`,background:sel?"#6366f1":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:13}}>
+              {sel&&"✓"}
+            </div>
+            {opt}
+          </div>;
+        })}
+
+        {q?.type==="OPEN_TEXT"&&<textarea value={answers[q.id]||""} onChange={e=>handleText(q.id,e.target.value)}
+          placeholder="Введите ваш ответ..." rows={3}
+          style={{width:"100%",background:"rgba(255,255,255,.06)",border:"1px solid rgba(255,255,255,.12)",borderRadius:10,padding:"12px 16px",fontSize:14,color:"#e2e8f0",resize:"vertical",fontFamily:"inherit"}}/>}
+      </GlassCard>
+
+      <div style={{display:"flex",justifyContent:"space-between",marginTop:20}}>
+        <Btn onClick={()=>setIdx(i=>Math.max(0,i-1))} outline disabled={idx===0} size="sm">← Назад</Btn>
+        {idx<qs.length-1
+          ? <Btn onClick={()=>setIdx(i=>i+1)} size="sm">Далее →</Btn>
+          : <Btn onClick={handleFinish} color="#10b981" size="sm">✓ Завершить</Btn>}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════ QUIZ RESULT ═══════════════
+function QuizResult({quiz,result,onRestart,onExit}){
+  const grade=result.score>=90?"EXCELLENT":result.score>=75?"GOOD":result.score>=60?"PASS":"FAIL";
+  const conf={EXCELLENT:{emoji:"🏆",label:"Отлично!",color:"#10b981"},GOOD:{emoji:"⭐",label:"Хорошо!",color:"#3b82f6"},PASS:{emoji:"✅",label:"Зачёт",color:"#f59e0b"},FAIL:{emoji:"📉",label:"Не сдал",color:"#ef4444"}};
+  const c=conf[grade];
+  const mm=Math.floor(result.timeSpent/60),ss=String(result.timeSpent%60).padStart(2,"0");
+  return(
+    <div style={{maxWidth:500,margin:"0 auto",padding:20,textAlign:"center"}}>
+      <GlassCard style={{padding:40}}>
+        <div style={{fontSize:64,marginBottom:8}}>{c.emoji}</div>
+        <div style={{fontSize:24,fontWeight:900,color:c.color,marginBottom:4}}>{c.label}</div>
+        <div style={{fontSize:64,fontWeight:900,color:c.color,margin:"20px 0"}}>{result.score}%</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:28}}>
+          {[["✅ Верно",`${result.correct}`,"#10b981"],["📝 Итого",`${result.total}`,"#6366f1"],["⏱ Время",`${mm}:${ss}`,"#f59e0b"]].map(([l,v,col])=>(
+            <div key={l} style={{background:"rgba(255,255,255,.05)",borderRadius:12,padding:"14px 8px"}}>
+              <div style={{fontSize:11,color:"#64748b",marginBottom:4}}>{l}</div>
+              <div style={{fontSize:20,fontWeight:800,color:col}}>{v}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:10}}>
+          <Btn onClick={onRestart} outline style={{flex:1}}>🔄 Ещё раз</Btn>
+          <Btn onClick={onExit} style={{flex:1}}>← Назад</Btn>
+        </div>
+      </GlassCard>
+    </div>
+  );
+}
+
+// ═══════════════ CREATE / EDIT QUIZ ═══════════════
+function QuizEditor({quiz:editQuiz,user,onSave,onCancel}){
+  const[title,setTitle]=useState(editQuiz?.title||"");
+  const[category,setCategory]=useState(editQuiz?.category||"Python");
+  const[difficulty,setDifficulty]=useState(editQuiz?.difficulty||"MEDIUM");
+  const[timer,setTimer]=useState(editQuiz?.timerMinutes||20);
+  const[passing,setPassing]=useState(editQuiz?.passingScore||60);
+  const[coverColor,setCoverColor]=useState(editQuiz?.coverColor||"#6366f1");
+  const[emoji,setEmoji]=useState(editQuiz?.emoji||"💻");
+  const[questions,setQuestions]=useState(editQuiz?.questions||[]);
+  const[status,setStatus]=useState(editQuiz?.status||"ACTIVE");
+  const[saving,setSaving]=useState(false);
+  const[error,setError]=useState("");
+
+  const EMOJIS=["💻","🐍","🟨","⚛️","🗄️","🌿","🐳","🌐","⚡","🔐","🎯","📊","🧠","🔧","☁️"];
+  const COLORS=["#6366f1","#8b5cf6","#3b82f6","#0ea5e9","#10b981","#f59e0b","#ef4444","#f97316","#3572A5","#f7df1e","#2496ed","#f05032"];
+  const CATS=["Python","JavaScript","Java","C++","Алгоритмы","Базы данных","DevOps","Frontend","Сети","Кибербезопасность"];
+
+  function addQ(){
+    setQuestions(qs=>[...qs,{id:Date.now().toString(),text:"",type:"SINGLE_CHOICE",points:1,options:["","","",""],correctAnswerIndices:[0]}]);
+  }
+  function removeQ(id){setQuestions(qs=>qs.filter(q=>q.id!==id));}
+  function updateQ(id,field,val){setQuestions(qs=>qs.map(q=>q.id===id?{...q,[field]:val}:q));}
+
+  async function save(){
+    if(!title.trim()){setError("Введите название");return;}
+    if(questions.length===0){setError("Добавьте хотя бы один вопрос");return;}
+    setError(""); setSaving(true);
+    try{
+      const body={title,category,difficulty,timerMinutes:Number(timer),passingScore:Number(passing),coverColor,emoji,status,questions,tags:[category.toLowerCase()]};
+      let data;
+      if(editQuiz?.id){
+        data=await apiCall("PUT",`/api/quizzes/${editQuiz.id}`,body);
+      } else {
+        data=await apiCall("POST","/api/quizzes",body);
+      }
+      onSave(data);
+    }catch(e){setError(e.message);}
+    setSaving(false);
+  }
+
+  return(
+    <div style={{maxWidth:720,margin:"0 auto",padding:20}}>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:24}}>
+        <Btn onClick={onCancel} outline size="sm" color="#64748b">← Назад</Btn>
+        <h2 style={{flex:1,fontSize:20,fontWeight:800}}>{editQuiz?"Редактировать тест":"Создать тест"}</h2>
+        <Btn onClick={save} disabled={saving} color="#10b981">{saving?"Сохранение...":"💾 Сохранить"}</Btn>
+      </div>
+
+      {error&&<div style={{background:"rgba(239,68,68,.15)",border:"1px solid rgba(239,68,68,.3)",borderRadius:10,padding:"10px 14px",color:"#fca5a5",fontSize:13,marginBottom:16}}>{error}</div>}
+
+      <GlassCard style={{padding:24,marginBottom:16}}>
+        <div style={{fontWeight:700,marginBottom:16,color:"#94a3b8",fontSize:13,textTransform:"uppercase",letterSpacing:1}}>Основное</div>
+        <div style={{display:"grid",gap:14}}>
+          <input value={title} onChange={e=>setTitle(e.target.value)} placeholder="Название теста"
+            style={{background:"rgba(255,255,255,.06)",border:"1px solid rgba(255,255,255,.12)",borderRadius:10,padding:"12px 16px",fontSize:15,color:"#f1f5f9",width:"100%"}}/>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            <select value={category} onChange={e=>setCategory(e.target.value)} style={{background:"#1e2235",border:"1px solid rgba(255,255,255,.12)",borderRadius:10,padding:"12px",color:"#e2e8f0",fontSize:14}}>
+              {CATS.map(c=><option key={c}>{c}</option>)}
+            </select>
+            <select value={difficulty} onChange={e=>setDifficulty(e.target.value)} style={{background:"#1e2235",border:"1px solid rgba(255,255,255,.12)",borderRadius:10,padding:"12px",color:"#e2e8f0",fontSize:14}}>
+              {Object.entries(DIFF).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+            </select>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+            <div><div style={{fontSize:12,color:"#64748b",marginBottom:6}}>Время (мин)</div>
+              <input type="number" value={timer} onChange={e=>setTimer(e.target.value)} min={5} max={120} style={{width:"100%",background:"rgba(255,255,255,.06)",border:"1px solid rgba(255,255,255,.12)",borderRadius:10,padding:"10px",color:"#e2e8f0",fontSize:14}}/></div>
+            <div><div style={{fontSize:12,color:"#64748b",marginBottom:6}}>Проходной балл %</div>
+              <input type="number" value={passing} onChange={e=>setPassing(e.target.value)} min={0} max={100} style={{width:"100%",background:"rgba(255,255,255,.06)",border:"1px solid rgba(255,255,255,.12)",borderRadius:10,padding:"10px",color:"#e2e8f0",fontSize:14}}/></div>
+            <div><div style={{fontSize:12,color:"#64748b",marginBottom:6}}>Статус</div>
+              <select value={status} onChange={e=>setStatus(e.target.value)} style={{width:"100%",background:"#1e2235",border:"1px solid rgba(255,255,255,.12)",borderRadius:10,padding:"10px",color:"#e2e8f0",fontSize:14}}>
+                <option value="ACTIVE">Активен</option><option value="DRAFT">Черновик</option><option value="PRIVATE">Приватный</option>
+              </select></div>
+          </div>
+        </div>
+
+        {/* Emoji & Color */}
+        <div style={{marginTop:16}}>
+          <div style={{fontSize:12,color:"#64748b",marginBottom:8}}>Иконка</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
+            {EMOJIS.map(e=><button key={e} onClick={()=>setEmoji(e)} style={{background:emoji===e?"rgba(99,102,241,.3)":"rgba(255,255,255,.05)",border:`2px solid ${emoji===e?"#6366f1":"transparent"}`,borderRadius:10,padding:"8px 10px",fontSize:18,cursor:"pointer"}}>{e}</button>)}
+          </div>
+          <div style={{fontSize:12,color:"#64748b",marginBottom:8}}>Цвет обложки</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {COLORS.map(c=><button key={c} onClick={()=>setCoverColor(c)} style={{width:32,height:32,borderRadius:8,background:c,border:`3px solid ${coverColor===c?"#fff":"transparent"}`,cursor:"pointer"}}/>)}
+          </div>
+        </div>
+      </GlassCard>
+
+      {/* Questions */}
+      <GlassCard style={{padding:24,marginBottom:16}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div style={{fontWeight:700,color:"#94a3b8",fontSize:13,textTransform:"uppercase",letterSpacing:1}}>Вопросы ({questions.length})</div>
+          <Btn onClick={addQ} size="sm" color="#10b981">+ Добавить</Btn>
+        </div>
+        {questions.map((q,qi)=>(
+          <div key={q.id} style={{background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.07)",borderRadius:14,padding:18,marginBottom:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+              <span style={{color:"#6366f1",fontWeight:700,fontSize:13}}>Вопрос {qi+1}</span>
+              <button onClick={()=>removeQ(q.id)} style={{background:"rgba(239,68,68,.15)",border:"none",borderRadius:8,padding:"4px 10px",color:"#fca5a5",cursor:"pointer",fontSize:13}}>✕</button>
+            </div>
+            <textarea value={q.text} onChange={e=>updateQ(q.id,"text",e.target.value)} placeholder="Текст вопроса..." rows={2}
+              style={{width:"100%",background:"rgba(255,255,255,.05)",border:"1px solid rgba(255,255,255,.1)",borderRadius:8,padding:"10px",fontSize:14,color:"#e2e8f0",resize:"vertical",marginBottom:10,fontFamily:"inherit"}}/>
+            <div style={{display:"flex",gap:10,marginBottom:10}}>
+              <select value={q.type} onChange={e=>updateQ(q.id,"type",e.target.value)} style={{background:"#1e2235",border:"1px solid rgba(255,255,255,.1)",borderRadius:8,padding:"8px",color:"#e2e8f0",fontSize:13,flex:1}}>
+                <option value="SINGLE_CHOICE">Один вариант</option>
+                <option value="MULTIPLE_CHOICE">Несколько</option>
+                <option value="TRUE_FALSE">Верно/Неверно</option>
+                <option value="OPEN_TEXT">Открытый ответ</option>
+              </select>
+              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                <span style={{fontSize:13,color:"#64748b"}}>Баллы:</span>
+                <input type="number" value={q.points} onChange={e=>updateQ(q.id,"points",Number(e.target.value))} min={1} max={10}
+                  style={{width:60,background:"rgba(255,255,255,.05)",border:"1px solid rgba(255,255,255,.1)",borderRadius:8,padding:"8px",color:"#e2e8f0",fontSize:13,textAlign:"center"}}/>
+              </div>
+            </div>
+            {(q.type==="SINGLE_CHOICE"||q.type==="MULTIPLE_CHOICE")&&(q.options||[]).map((opt,oi)=>(
+              <div key={oi} style={{display:"flex",gap:8,marginBottom:6,alignItems:"center"}}>
+                <input type={q.type==="MULTIPLE_CHOICE"?"checkbox":"radio"}
+                  checked={q.type==="MULTIPLE_CHOICE"?(q.correctAnswerIndices||[]).includes(oi):q.correctAnswerIndices?.[0]===oi}
+                  onChange={()=>{
+                    if(q.type==="MULTIPLE_CHOICE"){
+                      const cur=q.correctAnswerIndices||[];
+                      updateQ(q.id,"correctAnswerIndices",cur.includes(oi)?cur.filter(i=>i!==oi):[...cur,oi]);
+                    } else { updateQ(q.id,"correctAnswerIndices",[oi]); }
+                  }} style={{accentColor:"#6366f1"}}/>
+                <input value={opt} onChange={e=>updateQ(q.id,"options",(q.options||[]).map((o,i)=>i===oi?e.target.value:o))}
+                  placeholder={`Вариант ${oi+1}`}
+                  style={{flex:1,background:"rgba(255,255,255,.05)",border:"1px solid rgba(255,255,255,.08)",borderRadius:8,padding:"8px 12px",fontSize:13,color:"#e2e8f0"}}/>
+              </div>
+            ))}
+            {q.type==="TRUE_FALSE"&&<div style={{display:"flex",gap:8}}>
+              {["Верно","Неверно"].map((opt,oi)=>(
+                <label key={oi} style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer",color:"#94a3b8",fontSize:14}}>
+                  <input type="radio" name={`tf_${q.id}`} checked={q.correctAnswerIndices?.[0]===oi} onChange={()=>updateQ(q.id,"correctAnswerIndices",[oi])} style={{accentColor:"#6366f1"}}/>{opt}
+                </label>
+              ))}
+            </div>}
+            {q.type==="OPEN_TEXT"&&<input value={q.correctTextAnswer||""} onChange={e=>updateQ(q.id,"correctTextAnswer",e.target.value)} placeholder="Правильный ответ (точная строка)"
+              style={{width:"100%",background:"rgba(255,255,255,.05)",border:"1px solid rgba(255,255,255,.1)",borderRadius:8,padding:"8px 12px",fontSize:13,color:"#e2e8f0"}}/>}
+          </div>
+        ))}
+        {questions.length===0&&<div style={{textAlign:"center",padding:32,color:"#334155"}}>Нажмите «+ Добавить» чтобы создать первый вопрос</div>}
+      </GlassCard>
+    </div>
+  );
+}
+
+// ═══════════════ PROFILE ═══════════════
+function ProfilePage({user,myQuizzes,onEditQuiz,onDeleteQuiz,onRefresh}){
+  const pts=user.totalPoints||0;
+  const ranks=[[100,"🌱 Новичок"],[500,"📖 Ученик"],[1000,"🎓 Студент"],[2500,"⭐ Знаток"],[5000,"🏅 Эксперт"],[10000,"💎 Мастер"]];
+  const next=ranks.find(([t])=>pts<t);
+
+  return(
+    <div style={{maxWidth:800,margin:"0 auto",padding:20}}>
+      {/* Profile Card */}
+      <GlassCard style={{padding:28,marginBottom:20,display:"flex",gap:20,alignItems:"center"}}>
+        <Avatar user={user} size={72}/>
+        <div style={{flex:1}}>
+          <div style={{fontWeight:800,fontSize:22,color:"#f1f5f9"}}>{user.name}</div>
+          <div style={{color:"#6366f1",fontSize:13,marginBottom:4}}>{user.email}</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <Badge label={user.rankLabel||"🌱 Новичок"} color="#f59e0b" bg="rgba(245,158,11,.15)"/>
+            <Badge label={`${pts} очков`} color="#6366f1" bg="rgba(99,102,241,.15)"/>
+            {user.googleAuth&&<Badge label="Google" color="#10b981" bg="rgba(16,185,129,.15)" emoji="🌐"/>}
+          </div>
+        </div>
+      </GlassCard>
+
+      {/* Rank Progress */}
+      {next&&<GlassCard style={{padding:20,marginBottom:20}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+          <span style={{fontSize:13,color:"#94a3b8"}}>Прогресс до {next[1]}</span>
+          <span style={{fontSize:13,color:"#6366f1",fontWeight:700}}>{pts} / {next[0]}</span>
+        </div>
+        <div style={{background:"rgba(255,255,255,.06)",borderRadius:99,height:8}}>
+          <div style={{width:`${Math.min(100,pts/next[0]*100)}%`,height:"100%",background:"linear-gradient(90deg,#6366f1,#8b5cf6)",borderRadius:99,transition:"width 1s ease"}}/>
+        </div>
+      </GlassCard>}
+
+      {/* My Quizzes */}
+      <GlassCard style={{padding:24}}>
+        <div style={{fontWeight:700,fontSize:17,marginBottom:16,color:"#f1f5f9"}}>📁 Мои тесты ({myQuizzes.length})</div>
+        {myQuizzes.length===0
+          ? <div style={{textAlign:"center",padding:32,color:"#334155"}}>Вы ещё не создали ни одного теста</div>
+          : myQuizzes.map(q=>(
+            <div key={q.id} style={{display:"flex",alignItems:"center",gap:12,background:"rgba(255,255,255,.04)",border:"1px solid rgba(255,255,255,.07)",borderRadius:12,padding:"14px 16px",marginBottom:10}}>
+              <span style={{fontSize:24}}>{q.emoji}</span>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,color:"#f1f5f9",fontSize:14}}>{q.title}</div>
+                <div style={{color:"#64748b",fontSize:12,marginTop:2}}>{q.category} • {Array.isArray(q.questions)?q.questions.length:0} вопр. • {q.status==="ACTIVE"?"🟢 Активен":"🟡 Черновик"}</div>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>onEditQuiz(q)} outline size="sm">✏️</Btn>
+                <Btn onClick={()=>onDeleteQuiz(q.id)} size="sm" color="#ef4444" outline>🗑️</Btn>
+              </div>
+            </div>
+          ))}
+      </GlassCard>
+    </div>
+  );
+}
+
+// ═══════════════ MAIN APP ═══════════════
+function App(){
+  const[user,setUser]=useState(()=>{
+    try{return JSON.parse(localStorage.getItem(USER_KEY));}catch{return null;}
+  });
+  const[page,setPage]=useState("catalog"); // catalog | profile | create | edit | session | result
+  const[quizzes,setQuizzes]=useState([]);
+  const[myQuizzes,setMyQuizzes]=useState([]);
+  const[activeQuiz,setActiveQuiz]=useState(null);
+  const[editQuiz,setEditQuiz]=useState(null);
+  const[result,setResult]=useState(null);
+  const[catFilter,setCatFilter]=useState("Все");
+  const[search,setSearch]=useState("");
+  const[loading,setLoading]=useState(false);
+  const[seeded,setSeeded]=useState(false);
+
+  // Seed demo quizzes если пустая БД
+  async function seedIfEmpty(token){
+    try{
+      const list=await apiCall("GET","/api/quizzes/public");
+      if(list.length===0&&!seeded){
+        setSeeded(true);
+        for(const q of SEED_QUIZZES){
+          await apiCall("POST","/api/quizzes",q).catch(()=>{});
+        }
+        return await apiCall("GET","/api/quizzes/public");
+      }
+      return list;
+    }catch{return [];}
+  }
+
+  async function loadData(){
+    if(!user) return;
+    setLoading(true);
+    try{
+      const pub=await seedIfEmpty();
+      setQuizzes(pub);
+      const my=await apiCall("GET","/api/quizzes/my");
+      setMyQuizzes(my);
+    }catch{}
+    setLoading(false);
+  }
+
+  useEffect(()=>{if(user) loadData();},[user]);
+
+  function handleAuth(u){
+    setUser(u);
+    localStorage.setItem(USER_KEY,JSON.stringify(u));
+  }
+
+  function logout(){
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+    setUser(null);
+    setQuizzes([]);
+    setMyQuizzes([]);
+  }
+
+  async function handleSaveQuiz(data){
+    await loadData();
+    setPage("profile");
+    setEditQuiz(null);
+  }
+
+  async function handleDeleteQuiz(id){
+    if(!confirm("Удалить тест?")) return;
+    await apiCall("DELETE",`/api/quizzes/${id}`);
+    await loadData();
+  }
+
+  if(!user) return <AuthPage onAuth={handleAuth}/>;
+
+  // Session
+  if(page==="session"&&activeQuiz){
+    return <div style={{minHeight:"100vh",padding:"80px 20px 20px",background:"#0f1117"}}>
+      <QuizSession quiz={activeQuiz} onFinish={r=>{setResult(r);setPage("result");}} onExit={()=>{setPage("catalog");setActiveQuiz(null);}}/>
+    </div>;
+  }
+  if(page==="result"&&result&&activeQuiz){
+    return <div style={{minHeight:"100vh",padding:"80px 20px 20px",background:"#0f1117"}}>
+      <QuizResult quiz={activeQuiz} result={result} onRestart={()=>setPage("session")} onExit={()=>{setPage("catalog");setActiveQuiz(null);setResult(null);}}/>
+    </div>;
+  }
+  if(page==="create"||page==="edit"){
+    return <div style={{minHeight:"100vh",paddingTop:72,background:"#0f1117"}}>
+      <QuizEditor quiz={editQuiz} user={user} onSave={handleSaveQuiz} onCancel={()=>{setPage("catalog");setEditQuiz(null);}}/>
+    </div>;
+  }
+
+  // Filtered quizzes
+  const allQ=[...quizzes,...myQuizzes.filter(m=>!quizzes.find(q=>q.id===m.id))];
+  const filtered=allQ.filter(q=>{
+    if(catFilter!=="Все"&&q.category!==catFilter) return false;
+    if(search&&!q.title.toLowerCase().includes(search.toLowerCase())&&!q.category.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
+
+  return(
+    <div style={{minHeight:"100vh",background:"#0f1117"}}>
+      {/* NAV */}
+      <nav style={{position:"fixed",top:0,left:0,right:0,zIndex:100,background:"rgba(15,17,23,.9)",backdropFilter:"blur(12px)",borderBottom:"1px solid rgba(255,255,255,.06)",height:60,display:"flex",alignItems:"center",padding:"0 24px",gap:16}}>
+        <div style={{fontWeight:900,fontSize:18,background:"linear-gradient(135deg,#6366f1,#8b5cf6)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",marginRight:8}}>⚡ TestPlatform</div>
+        {["catalog","profile"].map(p=>(
+          <button key={p} onClick={()=>setPage(p)}
+            style={{background:page===p?"rgba(99,102,241,.2)":"transparent",color:page===p?"#a5b4fc":"#94a3b8",border:`1px solid ${page===p?"rgba(99,102,241,.4)":"transparent"}`,borderRadius:8,padding:"6px 14px",fontSize:13,fontWeight:600,cursor:"pointer",transition:"all .2s"}}>
+            {p==="catalog"?"📚 Каталог":"👤 Профиль"}
+          </button>
+        ))}
+        <div style={{flex:1}}/>
+        <Btn onClick={()=>{setEditQuiz(null);setPage("create");}} color="#10b981" size="sm">+ Создать тест</Btn>
+        <button onClick={logout} style={{background:"rgba(239,68,68,.1)",border:"1px solid rgba(239,68,68,.2)",color:"#fca5a5",borderRadius:8,padding:"6px 12px",fontSize:13,cursor:"pointer"}}>Выйти</button>
+      </nav>
+
+      <div style={{paddingTop:72}}>
+        {/* CATALOG */}
+        {page==="catalog"&&<div style={{maxWidth:1100,margin:"0 auto",padding:24}}>
+          <div style={{marginBottom:24}}>
+            <h1 style={{fontSize:26,fontWeight:900,color:"#f1f5f9",marginBottom:4}}>📚 Каталог IT-тестов</h1>
+            <p style={{color:"#64748b",fontSize:14}}>Только программирование и информационные технологии</p>
+          </div>
+
+          {/* Search + Filter */}
+          <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
+            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Поиск по названию..."
+              style={{flex:1,minWidth:200,background:"rgba(255,255,255,.06)",border:"1px solid rgba(255,255,255,.12)",borderRadius:12,padding:"11px 16px",fontSize:14,color:"#e2e8f0"}}/>
+          </div>
+          <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:4,marginBottom:24}}>
+            {CATEGORIES.map(c=>(
+              <button key={c} onClick={()=>setCatFilter(c)}
+                style={{whiteSpace:"nowrap",background:catFilter===c?"rgba(99,102,241,.3)":"rgba(255,255,255,.05)",color:catFilter===c?"#a5b4fc":"#94a3b8",border:`1px solid ${catFilter===c?"rgba(99,102,241,.5)":"rgba(255,255,255,.08)"}`,borderRadius:99,padding:"6px 16px",fontSize:13,fontWeight:600,cursor:"pointer",transition:"all .2s"}}>
+                {c}
+              </button>
+            ))}
+          </div>
+
+          {loading
+            ? <div style={{display:"flex",justifyContent:"center",padding:60}}><Spinner/></div>
+            : filtered.length===0
+              ? <div style={{textAlign:"center",padding:60,color:"#334155"}}>Тестов не найдено</div>
+              : <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:16}}>
+                  {filtered.map(q=><QuizCard key={q.id} quiz={q} isOwner={q.creatorId===user.id}
+                    onStart={q=>{setActiveQuiz(q);setPage("session");}}
+                    onEdit={q=>{setEditQuiz(q);setPage("edit");}}/>)}
+                </div>}
+        </div>}
+
+        {/* PROFILE */}
+        {page==="profile"&&<ProfilePage user={user} myQuizzes={myQuizzes}
+          onEditQuiz={q=>{setEditQuiz(q);setPage("edit");}}
+          onDeleteQuiz={handleDeleteQuiz}
+          onRefresh={loadData}/>}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
