@@ -47,6 +47,14 @@ public class QuizService {
         quiz.setQuestionsJson(toJson(body.get("questions")));
         quiz.setTags(joinTags(body.get("tags")));
         quiz.setCreator(user);
+
+        // ── ПРОКТОРИНГ ────────────────────────────────────────────
+        Object procObj = body.get("proctoringEnabled");
+        boolean procEnabled = false;
+        if (procObj instanceof Boolean) procEnabled = (Boolean) procObj;
+        else if (procObj instanceof String) procEnabled = Boolean.parseBoolean((String) procObj);
+        quiz.setProctoringEnabled(procEnabled);
+
         quizRepository.save(quiz);
 
         // Начислить очки
@@ -76,8 +84,17 @@ public class QuizService {
         if (body.containsKey("passingScore")) quiz.setPassingScore(((Number) body.get("passingScore")).intValue());
         if (body.containsKey("questions")) quiz.setQuestionsJson(toJson(body.get("questions")));
         if (body.containsKey("tags")) quiz.setTags(joinTags(body.get("tags")));
-        quiz.setUpdatedAt(LocalDateTime.now());
 
+        // ── ПРОКТОРИНГ ────────────────────────────────────────────
+        if (body.containsKey("proctoringEnabled")) {
+            Object procObj = body.get("proctoringEnabled");
+            boolean procEnabled = false;
+            if (procObj instanceof Boolean) procEnabled = (Boolean) procObj;
+            else if (procObj instanceof String) procEnabled = Boolean.parseBoolean((String) procObj);
+            quiz.setProctoringEnabled(procEnabled);
+        }
+
+        quiz.setUpdatedAt(LocalDateTime.now());
         quizRepository.save(quiz);
         return toMap(quiz);
     }
@@ -109,6 +126,8 @@ public class QuizService {
         m.put("avgScore", q.getAvgScore());
         m.put("createdAt", q.getCreatedAt() != null ? q.getCreatedAt().toString() : null);
         m.put("updatedAt", q.getUpdatedAt() != null ? q.getUpdatedAt().toString() : null);
+        // ── ПРОКТОРИНГ ────────────────────────────────────────────
+        m.put("proctoringEnabled", q.getProctoringEnabled());
         if (q.getCreator() != null) {
             m.put("creatorId", q.getCreator().getId());
             m.put("creatorName", q.getCreator().getName());

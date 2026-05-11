@@ -42,6 +42,11 @@ public class Quiz {
     private Integer totalAttempts = 0;
     private Double avgScore = 0.0;
 
+    // ── ПРОКТОРИНГ ────────────────────────────────────────────────
+    // Включён ли прокторинг для данного теста
+    @Column(name = "proctoring_enabled", nullable = false)
+    private Boolean proctoringEnabled = false;
+
     // Геттеры и сеттеры
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
@@ -90,4 +95,7 @@ public class Quiz {
 
     public Double getAvgScore() { return avgScore; }
     public void setAvgScore(Double avgScore) { this.avgScore = avgScore; }
+
+    public Boolean getProctoringEnabled() { return proctoringEnabled != null && proctoringEnabled; }
+    public void setProctoringEnabled(Boolean proctoringEnabled) { this.proctoringEnabled = proctoringEnabled != null && proctoringEnabled; }
 }
