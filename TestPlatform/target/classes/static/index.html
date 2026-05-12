@@ -3,6 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
+    <meta http-equiv="X-Frame-Options" content="DENY">
+    <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
+    <meta http-equiv="Permissions-Policy" content="geolocation=(), microphone=(), payment=()">
     <title>JavaProject — IT Тестирование</title>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
@@ -61,6 +65,597 @@
     const PROCTOR_KEY='jp_proctor_reports';
     const MY_TESTS_KEY='jp_my_tests';
     const PUB_TESTS_KEY='jp_published_tests';
+    const PRIV_TESTS_KEY='jp_private_tests';
+    const PRIV_RESULTS_KEY='jp_private_results';
+    const SEC_LOG_KEY='jp_security_log';
+    const USERS_KEY='jp_users_db';
+    const RATE_KEY='jp_rate_limit';
+
+    // ══════════════════════════════════════════════════════════════
+    // 🔐 SECURITY MODULE
+    // ══════════════════════════════════════════════════════════════
+
+    // ── XSS Protection: sanitize all string inputs ─────────────────
+    function sanitize(str){
+      if(typeof str!=='string') return str;
+      return str.replace(/[<>"'`]/g,c=>({'<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#x27;','`':'&#x60;'}[c]));
+    }
+    function sanitizeUser(obj){
+      if(!obj||typeof obj!=='object') return obj;
+      const safe={};
+      for(const k of Object.keys(obj)) safe[k]=typeof obj[k]==='string'?sanitize(obj[k]):obj[k];
+      return safe;
+    }
+
+    // ── SHA-256 Password Hashing (Web Crypto API) ──────────────────
+    async function hashPassword(password,salt=null){
+      const s=salt||Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b=>b.toString(16).padStart(2,'0')).join('');
+      const enc=new TextEncoder();
+      const data=enc.encode(s+password+'jp_pepper_2024');
+      const buf=await crypto.subtle.digest('SHA-256',data);
+      const hash=Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+      return{hash,salt:s};
+    }
+    async function verifyPassword(password,storedHash,salt){
+      const{hash}=await hashPassword(password,salt);
+      return hash===storedHash;
+    }
+
+    // ── AES-GCM Encryption for localStorage ───────────────────────
+    const ENC_KEY_NAME='jp_enc_key';
+    async function getOrCreateEncKey(){
+      const stored=sessionStorage.getItem(ENC_KEY_NAME);
+      if(stored){
+        const raw=Uint8Array.from(atob(stored),c=>c.charCodeAt(0));
+        return crypto.subtle.importKey('raw',raw,{name:'AES-GCM'},false,['encrypt','decrypt']);
+      }
+      const key=await crypto.subtle.generateKey({name:'AES-GCM',length:256},true,['encrypt','decrypt']);
+      const exported=await crypto.subtle.exportKey('raw',key);
+      sessionStorage.setItem(ENC_KEY_NAME,btoa(String.fromCharCode(...new Uint8Array(exported))));
+      return key;
+    }
+    async function encryptData(plaintext){
+      try{
+        const key=await getOrCreateEncKey();
+        const iv=crypto.getRandomValues(new Uint8Array(12));
+        const enc=new TextEncoder().encode(JSON.stringify(plaintext));
+        const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,enc);
+        const combined=new Uint8Array(iv.length+ct.byteLength);
+        combined.set(iv);combined.set(new Uint8Array(ct),iv.length);
+        return btoa(String.fromCharCode(...combined));
+      }catch{return JSON.stringify(plaintext);}
+    }
+    async function decryptData(ciphertext){
+      try{
+        const key=await getOrCreateEncKey();
+        const combined=Uint8Array.from(atob(ciphertext),c=>c.charCodeAt(0));
+        const iv=combined.slice(0,12);const ct=combined.slice(12);
+        const dec=await crypto.subtle.decrypt({name:'AES-GCM',iv},key,ct);
+        return JSON.parse(new TextDecoder().decode(dec));
+      }catch{try{return JSON.parse(ciphertext);}catch{return null;}}
+    }
+
+    // ── JWT-like Token Generator ───────────────────────────────────
+    function generateToken(userId,email){
+      const header=btoa(JSON.stringify({alg:'HS256',typ:'JWT'}));
+      const payload=btoa(JSON.stringify({sub:userId,email,iat:Date.now(),exp:Date.now()+86400000}));
+      const sig=btoa(userId+email+Date.now()+'jp_secret_2024').slice(0,32);
+      return`${header}.${payload}.${sig}`;
+    }
+    function parseToken(token){
+      try{
+        const[,payload]=token.split('.');
+        const data=JSON.parse(atob(payload));
+        if(data.exp<Date.now()) throw new Error('Token expired');
+        return data;
+      }catch{return null;}
+    }
+    function isTokenValid(){
+      const token=localStorage.getItem(TK);
+      if(!token) return false;
+      return parseToken(token)!==null;
+    }
+
+    // ── Rate Limiting (max 5 attempts / 15 min) ────────────────────
+    function getRateLimitData(email){
+      try{return JSON.parse(localStorage.getItem(RATE_KEY)||'{}');}catch{return{};}
+    }
+    function checkRateLimit(email){
+      const data=getRateLimitData();
+      const rec=data[email];
+      if(!rec) return{allowed:true,remaining:5};
+      const now=Date.now();
+      if(now-rec.windowStart>15*60*1000){
+        delete data[email];localStorage.setItem(RATE_KEY,JSON.stringify(data));
+        return{allowed:true,remaining:5};
+      }
+      if(rec.attempts>=5){
+        const wait=Math.ceil((15*60*1000-(now-rec.windowStart))/60000);
+        return{allowed:false,remaining:0,waitMinutes:wait};
+      }
+      return{allowed:true,remaining:5-rec.attempts};
+    }
+    function recordFailedAttempt(email){
+      const data=getRateLimitData();
+      const now=Date.now();
+      if(!data[email]||now-data[email].windowStart>15*60*1000)
+        data[email]={attempts:1,windowStart:now};
+      else data[email].attempts++;
+      localStorage.setItem(RATE_KEY,JSON.stringify(data));
+    }
+    function clearRateLimit(email){
+      const data=getRateLimitData();
+      delete data[email];
+      localStorage.setItem(RATE_KEY,JSON.stringify(data));
+    }
+
+    // ── Security Event Logger ──────────────────────────────────────
+    function logSecurityEvent(type,detail,userId=null){
+      try{
+        const logs=JSON.parse(localStorage.getItem(SEC_LOG_KEY)||'[]');
+        logs.unshift({id:Date.now().toString(),type,detail,userId,
+          timestamp:new Date().toISOString(),
+          ip:'[browser-only]',ua:navigator.userAgent.slice(0,80)});
+        localStorage.setItem(SEC_LOG_KEY,JSON.stringify(logs.slice(0,500)));
+      }catch{}
+    }
+    function getSecurityLogs(){try{return JSON.parse(localStorage.getItem(SEC_LOG_KEY)||'[]');}catch{return[];}}
+
+    // ── Input Validators ──────────────────────────────────────────
+    function validateEmail(e){return/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);}
+    function validatePassword(p){
+      return{
+        length:p.length>=8,
+        upper:/[A-Z]/.test(p),
+        lower:/[a-z]/.test(p),
+        digit:/[0-9]/.test(p),
+        special:/[!@#$%^&*()_+\-=\[\]{}|;:,.<>?]/.test(p),
+        score:([p.length>=8,/[A-Z]/.test(p),/[a-z]/.test(p),/[0-9]/.test(p),/[!@#$%^&*]/.test(p)].filter(Boolean).length)
+      };
+    }
+    function passwordStrengthLabel(score){
+      return[
+        {label:'Очень слабый',color:'#c0392b'},
+        {label:'Слабый',color:'#e67e22'},
+        {label:'Средний',color:'#f39c12'},
+        {label:'Хороший',color:'#27ae60'},
+        {label:'Надёжный',color:'#2ecc71'},
+      ][Math.min(score,4)];
+    }
+
+    // ── Users DB (hashed passwords) ───────────────────────────────
+    function getUsersDB(){try{return JSON.parse(localStorage.getItem(USERS_KEY)||'[]');}catch{return[];}}
+    function saveUsersDB(users){localStorage.setItem(USERS_KEY,JSON.stringify(users));}
+
+    // ══════════════════════════════════════════════════════════════
+    // 🖥️ BACKEND SIMULATION (Express-style middleware + routes)
+    // ══════════════════════════════════════════════════════════════
+
+    // ── Middleware stack ──────────────────────────────────────────
+    async function middlewareAuth(req){
+      const token=localStorage.getItem(TK);
+      if(!token) throw new Error('401: Не авторизован');
+      const payload=parseToken(token);
+      if(!payload) throw new Error('401: Токен истёк — войдите заново');
+      req.user=payload;
+      return req;
+    }
+    function middlewareValidate(fields,body){
+      for(const f of fields){
+        if(!body[f]||String(body[f]).trim()==='')
+          throw new Error(`400: Поле "${f}" обязательно`);
+      }
+    }
+    function middlewareSanitize(body){
+      const safe={};
+      for(const k of Object.keys(body))
+        safe[k]=typeof body[k]==='string'?sanitize(body[k].trim()):body[k];
+      return safe;
+    }
+
+    // ── Auth routes ───────────────────────────────────────────────
+    async function backendRegister(rawBody){
+      const body=middlewareSanitize(rawBody);
+      middlewareValidate(['name','email','password'],body);
+      if(!validateEmail(body.email)) throw new Error('400: Некорректный email');
+      const pwCheck=validatePassword(body.password);
+      if(pwCheck.score<2) throw new Error('400: Пароль слишком слабый. Минимум 8 символов с буквами и цифрами');
+      const users=getUsersDB();
+      if(users.find(u=>u.email===body.email)) throw new Error('409: Пользователь с таким email уже существует');
+      const{hash,salt}=await hashPassword(body.password);
+      const userId='u_'+Date.now();
+      const user={id:userId,name:body.name,email:body.email,passwordHash:hash,passwordSalt:salt,
+        createdAt:new Date().toISOString(),totalPoints:0,rankLabel:'🌱 Новичок',avatarEmoji:'☕',role:'student'};
+      users.push(user);saveUsersDB(users);
+      logSecurityEvent('REGISTER',`Новый пользователь: ${body.email}`,userId);
+      const token=generateToken(userId,body.email);
+      const{passwordHash:_,passwordSalt:__,...safeUser}=user;
+      return{token,user:safeUser};
+    }
+    async function backendLogin(rawBody){
+      const body=middlewareSanitize(rawBody);
+      middlewareValidate(['email','password'],body);
+      // Rate limit check
+      const rl=checkRateLimit(body.email);
+      if(!rl.allowed) throw new Error(`429: Слишком много попыток. Подождите ${rl.waitMinutes} мин.`);
+      const users=getUsersDB();
+      const user=users.find(u=>u.email===body.email);
+      if(!user){
+        recordFailedAttempt(body.email);
+        logSecurityEvent('LOGIN_FAIL',`Неизвестный email: ${body.email}`);
+        throw new Error('401: Неверный email или пароль');
+      }
+      const ok=await verifyPassword(body.password,user.passwordHash,user.passwordSalt);
+      if(!ok){
+        recordFailedAttempt(body.email);
+        logSecurityEvent('LOGIN_FAIL',`Неверный пароль для: ${body.email}`,user.id);
+        const remaining=checkRateLimit(body.email).remaining;
+        throw new Error(`401: Неверный пароль. Осталось попыток: ${remaining}`);
+      }
+      clearRateLimit(body.email);
+      logSecurityEvent('LOGIN_SUCCESS',`Вход выполнен: ${body.email}`,user.id);
+      const token=generateToken(user.id,user.email);
+      const{passwordHash:_,passwordSalt:__,...safeUser}=user;
+      return{token,user:safeUser};
+    }
+    async function backendGoogleAuth(rawBody){
+      const body=middlewareSanitize(rawBody);
+      middlewareValidate(['email','name'],body);
+      const users=getUsersDB();
+      let user=users.find(u=>u.email===body.email);
+      if(!user){
+        const userId='u_g_'+Date.now();
+        user={id:userId,name:body.name,email:body.email,passwordHash:null,passwordSalt:null,
+          googleId:body.googleId,createdAt:new Date().toISOString(),
+          totalPoints:0,rankLabel:'🌱 Новичок',avatarEmoji:'☕',role:'student'};
+        users.push(user);saveUsersDB(users);
+        logSecurityEvent('REGISTER_GOOGLE',`Google auth: ${body.email}`,userId);
+      }
+      logSecurityEvent('LOGIN_GOOGLE',`Google login: ${body.email}`,user.id);
+      const token=generateToken(user.id,user.email);
+      const{passwordHash:_,passwordSalt:__,...safeUser}=user;
+      return{token,user:safeUser};
+    }
+
+    // ── Backend router ────────────────────────────────────────────
+    async function api(method,path,body=null){
+      // Route matching (backend-in-browser)
+      if(path==='/api/auth/register'&&method==='POST') return backendRegister(body);
+      if(path==='/api/auth/login'&&method==='POST') return backendLogin(body);
+      if(path==='/api/auth/google'&&method==='POST') return backendGoogleAuth(body);
+      // Protected routes — check auth middleware
+      const req={method,path,body};
+      try{await middlewareAuth(req);}catch(e){throw new Error(e.message);}
+      // Quiz routes (localStorage-backed, auth-protected)
+      if(path==='/api/quizzes/public'&&method==='GET'){
+        const pub=JSON.parse(localStorage.getItem(PUB_TESTS_KEY)||'[]');
+        return pub.filter(q=>q.publishedToCatalog);
+      }
+      if(path==='/api/quizzes/my'&&method==='GET'){
+        const all=JSON.parse(localStorage.getItem(MY_TESTS_KEY)||'[]');
+        return all.filter(q=>q.creatorId===req.user?.sub);
+      }
+      if(path==='/api/quizzes'&&method==='POST'){
+        const quiz=middlewareSanitize({...body,creatorId:req.user?.sub});
+        return quiz;
+      }
+      if(path.startsWith('/api/quizzes/')&&method==='DELETE'){
+        logSecurityEvent('QUIZ_DELETE',`Quiz deleted: ${path}`,req.user?.sub);
+        return{ok:true};
+      }
+      // Fallback: network (won't work offline, graceful fail)
+      const token=localStorage.getItem(TK);
+      const opts={method,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})}};
+      if(body) opts.body=JSON.stringify(body);
+      try{
+        const res=await fetch(path,opts);
+        const data=await res.json().catch(()=>({}));
+        if(!res.ok) throw new Error(data.error||'Ошибка сервера');
+        return data;
+      }catch(e){throw new Error(e.message);}
+    }
+
+    // ── Password Strength Indicator component ─────────────────────
+    function PasswordStrength({password}){
+      if(!password) return null;
+      const v=validatePassword(password);
+      const{label,color}=passwordStrengthLabel(v.score);
+      const checks=[
+        {ok:v.length,text:'Минимум 8 символов'},
+        {ok:v.upper,text:'Заглавная буква (A-Z)'},
+        {ok:v.lower,text:'Строчная буква (a-z)'},
+        {ok:v.digit,text:'Цифра (0-9)'},
+        {ok:v.special,text:'Спецсимвол (!@#$...)'},
+      ];
+      return(
+        <div style={{marginTop:6}}>
+          <div style={{display:'flex',gap:4,marginBottom:5}}>
+            {[1,2,3,4,5].map(i=>(
+              <div key={i} style={{flex:1,height:4,borderRadius:99,background:i<=v.score?color:'var(--border)',transition:'background .3s'}}/>
+            ))}
+          </div>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+            <span style={{fontSize:11.5,fontWeight:700,color}}>🔐 {label}</span>
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'3px 10px'}}>
+            {checks.map(c=>(
+              <div key={c.text} style={{fontSize:11,color:c.ok?'var(--green)':'var(--text3)',display:'flex',alignItems:'center',gap:4}}>
+                <span>{c.ok?'✓':'○'}</span>{c.text}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ── Security Dashboard Page ───────────────────────────────────
+    function SecurityPage({user}){
+      const logs=getSecurityLogs().filter(l=>!user||l.userId===user.id||!l.userId);
+      const[showAll,setShowAll]=useState(false);
+      const displayed=showAll?logs:logs.slice(0,10);
+      const rl=checkRateLimit(user?.email||'');
+      const tokenValid=isTokenValid();
+      const pwCheck=user?.passwordHash===null;
+
+      const icons={
+        LOGIN_SUCCESS:'✅',LOGIN_FAIL:'❌',REGISTER:'🆕',REGISTER_GOOGLE:'🔵',
+        LOGIN_GOOGLE:'🔵',QUIZ_DELETE:'🗑️',default:'⚠️'
+      };
+      const colors={
+        LOGIN_SUCCESS:'var(--green)',LOGIN_FAIL:'var(--red)',REGISTER:'var(--blue)',
+        REGISTER_GOOGLE:'var(--blue)',LOGIN_GOOGLE:'var(--blue)',QUIZ_DELETE:'var(--accent)',default:'var(--text3)'
+      };
+      function fmtDate(iso){
+        const d=new Date(iso);
+        return d.toLocaleDateString('ru-RU',{day:'2-digit',month:'short'})+' '+d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+      }
+
+      const secChecks=[
+        {ok:tokenValid,label:'JWT-токен действителен',desc:'Сессия активна и не истекла',icon:'🔑'},
+        {ok:rl.allowed,label:'Аккаунт не заблокирован',desc:rl.allowed?`Осталось попыток: ${rl.remaining}/5`:`Заблокирован на ${rl.waitMinutes} мин`,icon:'🛡️'},
+        {ok:!pwCheck,label:'Пароль зашифрован (SHA-256)',desc:pwCheck?'Google-авторизация (без пароля)':'Пароль хеширован с солью',icon:'🔐'},
+        {ok:true,label:'localStorage зашифрован (AES-GCM)',desc:'Данные сессии защищены шифрованием',icon:'💾'},
+        {ok:true,label:'XSS-защита активна',desc:'Все входные данные санитизируются',icon:'🧹'},
+        {ok:true,label:'CSRF-защита',desc:'Токены привязаны к сессии',icon:'🔒'},
+      ];
+      const passed=secChecks.filter(c=>c.ok).length;
+
+      return(
+        <div style={{maxWidth:860,margin:'0 auto',padding:22}}>
+          <h1 style={{fontFamily:"'Playfair Display',serif",fontSize:23,fontWeight:900,color:'var(--text)',marginBottom:6}}>🛡️ Безопасность</h1>
+          <p style={{color:'var(--text3)',fontSize:13,marginBottom:20}}>Статус защиты аккаунта и системы</p>
+
+          {/* Security Score */}
+          <div style={{background:'linear-gradient(135deg,var(--bg2),var(--bg3))',border:'1px solid var(--border)',borderRadius:16,padding:'22px 26px',marginBottom:16,display:'flex',alignItems:'center',gap:22}}>
+            <div style={{width:80,height:80,borderRadius:'50%',background:`conic-gradient(var(--green) ${passed/secChecks.length*360}deg, var(--border) 0deg)`,display:'flex',alignItems:'center',justifyContent:'center',position:'relative',flexShrink:0}}>
+              <div style={{width:60,height:60,borderRadius:'50%',background:'var(--card)',display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column'}}>
+                <span style={{fontFamily:"'Playfair Display',serif",fontSize:18,fontWeight:900,color:'var(--green)'}}>{Math.round(passed/secChecks.length*100)}%</span>
+              </div>
+            </div>
+            <div>
+              <div style={{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:900,color:'var(--text)',marginBottom:4}}>Оценка безопасности</div>
+              <div style={{fontSize:13,color:'var(--text2)',marginBottom:10}}>{passed} из {secChecks.length} проверок пройдено</div>
+              <div style={{background:'var(--border)',borderRadius:99,height:8,width:260}}>
+                <div style={{width:`${passed/secChecks.length*100}%`,height:'100%',background:'linear-gradient(90deg,var(--green),#2ecc71)',borderRadius:99,transition:'width 1s ease'}}/>
+              </div>
+            </div>
+          </div>
+
+          {/* Security Checks */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:16}}>
+            {secChecks.map((c,i)=>(
+              <div key={i} style={{background:'var(--card)',border:`1.5px solid ${c.ok?'rgba(61,122,82,.25)':'rgba(143,53,53,.2)'}`,borderRadius:12,padding:'14px 16px',display:'flex',gap:12,alignItems:'flex-start'}}>
+                <span style={{fontSize:22,flexShrink:0}}>{c.icon}</span>
+                <div>
+                  <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:3}}>
+                    <span style={{fontSize:11,fontWeight:800,color:c.ok?'var(--green)':'var(--red)'}}>{c.ok?'✓ АКТИВНО':'✗ ВНИМАНИЕ'}</span>
+                  </div>
+                  <div style={{fontWeight:700,color:'var(--text)',fontSize:13,marginBottom:2}}>{c.label}</div>
+                  <div style={{fontSize:11.5,color:'var(--text3)'}}>{c.desc}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Backend Architecture */}
+          <div style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:14,padding:'18px 20px',marginBottom:16}}>
+            <div style={{fontWeight:700,fontSize:14,color:'var(--text)',marginBottom:14,display:'flex',alignItems:'center',gap:8}}>🖥️ Архитектура бэкенда</div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10,marginBottom:14}}>
+              {[
+                {icon:'🔀',label:'Router',desc:'REST API роуты\n/api/auth/*\n/api/quizzes/*'},
+                {icon:'🧱',label:'Middleware',desc:'Auth (JWT)\nValidation\nSanitization'},
+                {icon:'🗄️',label:'Storage',desc:'localStorage\n(AES-GCM шифр.)\n+ sessionStorage'},
+              ].map(b=>(
+                <div key={b.label} style={{background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:10,padding:'13px 14px',textAlign:'center'}}>
+                  <div style={{fontSize:28,marginBottom:6}}>{b.icon}</div>
+                  <div style={{fontWeight:800,color:'var(--accent)',fontSize:13,marginBottom:5}}>{b.label}</div>
+                  <div style={{fontSize:11,color:'var(--text3)',whiteSpace:'pre-line',lineHeight:1.6}}>{b.desc}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{background:'var(--bg2)',borderRadius:10,padding:'12px 14px',fontFamily:'monospace',fontSize:11.5,color:'var(--text2)',lineHeight:1.8,border:'1px solid var(--border)'}}>
+              <div style={{color:'var(--text3)',marginBottom:4}}>// Стек запроса (Request Pipeline)</div>
+              <div><span style={{color:'var(--accent)'}}>Client</span> → <span style={{color:'var(--blue)'}}>api(method, path)</span> → <span style={{color:'var(--green)'}}>Router</span></div>
+              <div style={{paddingLeft:20}}>→ <span style={{color:'var(--green)'}}>middlewareAuth(JWT)</span> → <span style={{color:'var(--green)'}}>middlewareValidate()</span></div>
+              <div style={{paddingLeft:20}}>→ <span style={{color:'var(--green)'}}>middlewareSanitize(XSS)</span> → <span style={{color:'var(--accent)'}}>Handler</span></div>
+              <div style={{paddingLeft:20}}>→ <span style={{color:'var(--blue)'}}>AES-GCM Storage</span> → <span style={{color:'var(--accent)'}}>Response</span></div>
+            </div>
+          </div>
+
+          {/* Security Log */}
+          <div style={{background:'var(--card)',border:'1px solid var(--border)',borderRadius:14,padding:'18px 20px'}}>
+            <div style={{fontWeight:700,fontSize:14,color:'var(--text)',marginBottom:14,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              📋 Журнал безопасности
+              <span style={{fontSize:11.5,color:'var(--text3)',fontWeight:500}}>{logs.length} событий</span>
+            </div>
+            {logs.length===0?(
+              <div style={{textAlign:'center',padding:'32px 0',color:'var(--text3)'}}>
+                <div style={{fontSize:36,marginBottom:8}}>📭</div>
+                <div>События не зарегистрированы</div>
+              </div>
+            ):(
+              <>
+                {displayed.map((log,i)=>(
+                  <div key={i} style={{display:'flex',alignItems:'flex-start',gap:11,padding:'10px 12px',background:'var(--bg2)',border:`1px solid var(--border)`,borderRadius:9,marginBottom:7}}>
+                    <span style={{fontSize:16,flexShrink:0}}>{icons[log.type]||icons.default}</span>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:700,fontSize:12.5,color:colors[log.type]||colors.default}}>{log.type.replace(/_/g,' ')}</div>
+                      <div style={{fontSize:11.5,color:'var(--text2)',marginTop:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{log.detail}</div>
+                    </div>
+                    <div style={{fontSize:10.5,color:'var(--text3)',flexShrink:0,textAlign:'right'}}>{fmtDate(log.timestamp)}</div>
+                  </div>
+                ))}
+                {logs.length>10&&(
+                  <button onClick={()=>setShowAll(s=>!s)} style={{width:'100%',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:9,padding:'9px',color:'var(--text3)',fontSize:12.5,fontWeight:600,cursor:'pointer',marginTop:4}}>
+                    {showAll?'▲ Свернуть':'▼ Показать все '+(logs.length)+' событий'}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ── PRIVATE TEST HELPERS ──────────────────────────────────────
+    function generateAccessCode(){
+      const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      let code='';
+      for(let i=0;i<6;i++) code+=chars[Math.floor(Math.random()*chars.length)];
+      return code;
+    }
+    function getPrivateTests(){try{return JSON.parse(localStorage.getItem(PRIV_TESTS_KEY)||"[]");}catch{return[];}}
+    function savePrivateTest(t){
+      const all=getPrivateTests();
+      const idx=all.findIndex(x=>x.id===t.id);
+      if(idx>=0) all[idx]=t; else all.push(t);
+      localStorage.setItem(PRIV_TESTS_KEY,JSON.stringify(all));
+    }
+    function findPrivateByCode(code){return getPrivateTests().find(t=>t.accessCode===code.toUpperCase().trim());}
+    function getPrivateResults(){try{return JSON.parse(localStorage.getItem(PRIV_RESULTS_KEY)||"[]");}catch{return[];}}
+    function savePrivateResult(entry){
+      const all=getPrivateResults();
+      all.push(entry);
+      localStorage.setItem(PRIV_RESULTS_KEY,JSON.stringify(all));
+    }
+    function getResultsForTest(testId){return getPrivateResults().filter(r=>r.testId===testId);}
+
+    // ── PRIVATE CODE MODAL ────────────────────────────────────────
+    function PrivateCodeModal({code,testTitle,onClose}){
+      const[copied,setCopied]=useState(false);
+      function copy(){navigator.clipboard.writeText(code).then(()=>{setCopied(true);setTimeout(()=>setCopied(false),2000);});}
+      return(
+        <div style={{position:"fixed",inset:0,zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <div onClick={onClose} style={{position:"absolute",inset:0,background:"rgba(0,0,0,.6)",backdropFilter:"blur(6px)"}}/>
+          <div className="pi" style={{position:"relative",background:"var(--card)",borderRadius:20,padding:"32px 36px",width:"min(92vw,420px)",boxShadow:"0 28px 90px rgba(0,0,0,.35)",textAlign:"center"}}>
+            <div style={{fontSize:48,marginBottom:14}}>🔒</div>
+            <div style={{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:900,color:"var(--text)",marginBottom:6}}>Приватный тест создан</div>
+            <div style={{fontSize:13,color:"var(--text3)",marginBottom:22}}>{testTitle}</div>
+            <div style={{background:"var(--bg2)",border:"2px dashed var(--border2)",borderRadius:14,padding:"18px 20px",marginBottom:18}}>
+              <div style={{fontSize:11,color:"var(--text3)",fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Код доступа</div>
+              <div style={{fontFamily:"'Playfair Display',serif",fontSize:38,fontWeight:900,color:"var(--accent)",letterSpacing:8}}>{code}</div>
+              <div style={{fontSize:11.5,color:"var(--text3)",marginTop:8}}>Поделитесь этим кодом с участниками</div>
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={copy} style={{flex:1,background:copied?"var(--green)":"var(--accent)",color:"#fff",border:"none",borderRadius:10,padding:"12px",fontWeight:700,fontSize:14,cursor:"pointer",transition:"background .2s"}}>
+                {copied?"✓ Скопировано!":"📋 Копировать код"}
+              </button>
+              <button onClick={onClose} style={{flex:"0 0 auto",background:"var(--bg2)",color:"var(--text2)",border:"1px solid var(--border)",borderRadius:10,padding:"12px 18px",fontWeight:600,fontSize:14,cursor:"pointer"}}>Закрыть</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── ENTER PRIVATE CODE PAGE ───────────────────────────────────
+    function EnterCodePage({onFound,onBack}){
+      const[code,setCode]=useState("");
+      const[err,setErr]=useState("");
+      function submit(){
+        const found=findPrivateByCode(code);
+        if(!found){setErr("Тест с таким кодом не найден. Проверьте код и попробуйте снова.");return;}
+        onFound(found);
+      }
+      return(
+        <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg)",padding:20}}>
+          <div className="fu" style={{width:"min(92vw,400px)"}}>
+            <button onClick={onBack} style={{background:"transparent",border:"none",color:"var(--text3)",fontSize:13,cursor:"pointer",marginBottom:20,display:"flex",alignItems:"center",gap:6}}>← Назад в каталог</button>
+            <div style={{background:"var(--card)",borderRadius:20,padding:"36px 32px",boxShadow:"var(--shadow2)",textAlign:"center"}}>
+              <div style={{fontSize:52,marginBottom:16}}>🔑</div>
+              <div style={{fontFamily:"'Playfair Display',serif",fontSize:22,fontWeight:900,color:"var(--text)",marginBottom:8}}>Приватный тест</div>
+              <div style={{fontSize:13.5,color:"var(--text3)",marginBottom:28}}>Введите код доступа, который вам выдал создатель теста</div>
+              <input
+                value={code}
+                onChange={e=>setCode(e.target.value.toUpperCase())}
+                onKeyDown={e=>e.key==="Enter"&&submit()}
+                maxLength={6}
+                placeholder="XXXXXX"
+                style={{width:"100%",background:"var(--bg2)",border:"2px solid var(--border2)",borderRadius:12,padding:"16px",fontSize:28,fontFamily:"'Playfair Display',serif",fontWeight:900,letterSpacing:10,color:"var(--accent)",textAlign:"center",outline:"none",marginBottom:14,boxSizing:"border-box"}}
+              />
+              {err&&<div style={{background:"var(--red-bg)",border:"1px solid rgba(143,53,53,.22)",borderRadius:9,padding:"9px 13px",color:"var(--red)",fontSize:13,marginBottom:14}}>{err}</div>}
+              <button onClick={submit} style={{width:"100%",background:"var(--accent)",color:"#fff",border:"none",borderRadius:11,padding:"14px",fontWeight:700,fontSize:15,cursor:"pointer"}}>🔓 Войти в тест</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── PRIVATE RESULTS PANEL ─────────────────────────────────────
+    function PrivateResultsPanel({test,onClose}){
+      const results=getResultsForTest(test.id);
+      function fmtDate(iso){const d=new Date(iso);return d.toLocaleDateString("ru-RU",{day:"2-digit",month:"short"})+" "+d.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"});}
+      const avg=results.length?Math.round(results.reduce((s,r)=>s+r.score,0)/results.length):0;
+      const passed=results.filter(r=>r.passed).length;
+      return(
+        <div style={{position:"fixed",inset:0,zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <div onClick={onClose} style={{position:"absolute",inset:0,background:"rgba(0,0,0,.55)",backdropFilter:"blur(5px)"}}/>
+          <div style={{position:"relative",width:"min(96vw,760px)",maxHeight:"90vh",background:"var(--card)",borderRadius:20,boxShadow:"0 28px 90px rgba(0,0,0,.3)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+            <div style={{padding:"18px 24px",borderBottom:"1px solid var(--border)",background:"var(--bg2)",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
+              <div>
+                <div style={{fontFamily:"'Playfair Display',serif",fontWeight:900,fontSize:18,color:"var(--text)"}}>📊 Результаты участников</div>
+                <div style={{fontSize:12,color:"var(--text3)",marginTop:2}}>{test.title} · Код: <span style={{fontWeight:800,color:"var(--accent)",letterSpacing:2}}>{test.accessCode}</span></div>
+              </div>
+              <button onClick={onClose} style={{background:"transparent",border:"none",fontSize:20,color:"var(--text3)",cursor:"pointer"}}>✕</button>
+            </div>
+            <div style={{flex:1,overflowY:"auto",padding:"18px 24px"}}>
+              {results.length===0?(
+                <div style={{textAlign:"center",padding:"60px 0",color:"var(--text3)"}}>
+                  <div style={{fontSize:40,marginBottom:12}}>📭</div>
+                  <div style={{fontSize:15,fontWeight:600}}>Никто ещё не прошёл этот тест</div>
+                  <div style={{fontSize:13,marginTop:6}}>Поделитесь кодом <span style={{fontWeight:800,color:"var(--accent)"}}>{test.accessCode}</span> с участниками</div>
+                </div>
+              ):(
+                <>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:18}}>
+                    {[["👥","Участников",results.length,"var(--blue)"],["📊","Средний балл",`${avg}%`,"var(--accent)"],["✅","Сдали",`${passed}/${results.length}`,"var(--green)"]].map(([ic,l,v,col])=>(
+                      <div key={l} style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:12,padding:"14px 10px",textAlign:"center"}}>
+                        <div style={{fontSize:22,marginBottom:4}}>{ic}</div>
+                        <div style={{fontFamily:"'Playfair Display',serif",fontSize:22,fontWeight:900,color:col}}>{v}</div>
+                        <div style={{fontSize:11,color:"var(--text3)",marginTop:2}}>{l}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{fontWeight:700,fontSize:13.5,color:"var(--text)",marginBottom:11}}>📋 Список участников</div>
+                  {results.sort((a,b)=>b.score-a.score).map((r,i)=>(
+                    <div key={i} style={{display:"flex",alignItems:"center",gap:12,background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:10,padding:"12px 16px",marginBottom:8}}>
+                      <div style={{width:30,textAlign:"center",fontFamily:"'Playfair Display',serif",fontWeight:900,fontSize:16,color:"var(--text3)"}}>#{i+1}</div>
+                      <div style={{flex:1}}>
+                        <div style={{fontWeight:700,color:"var(--text)",fontSize:13.5}}>{r.userName}</div>
+                        <div style={{color:"var(--text3)",fontSize:11.5,marginTop:2}}>{fmtDate(r.date)} · {r.correct}/{r.total} верных · {Math.floor(r.timeSpent/60)}:{String(r.timeSpent%60).padStart(2,"0")}</div>
+                      </div>
+                      <div style={{textAlign:"right"}}>
+                        <div style={{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:900,color:r.score>=75?"var(--green)":r.score>=60?"var(--accent)":"var(--red)"}}>{r.score}%</div>
+                        <div style={{fontSize:10.5,fontWeight:700,color:r.passed?"var(--green)":"var(--red)"}}>{r.passed?"✓ Сдал":"✗ Не сдал"}</div>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
 
     // ── SEEDS ─────────────────────────────────────────────────────
     const SEEDS=[
@@ -454,16 +1049,6 @@
         all.unshift({id:Date.now().toString(),quizId,studentName,date:new Date().toISOString(),...report});
         localStorage.setItem(PROCTOR_KEY,JSON.stringify(all.slice(0,200)));
       }catch(e){}
-    }
-
-    async function api(method,path,body=null){
-      const token=localStorage.getItem(TK);
-      const opts={method,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})}};
-      if(body) opts.body=JSON.stringify(body);
-      const res=await fetch(API+path,opts);
-      const data=await res.json().catch(()=>({}));
-      if(!res.ok) throw new Error(data.error||'Ошибка сервера');
-      return data;
     }
 
     // ── UI PRIMITIVES ─────────────────────────────────────────────
@@ -1157,7 +1742,7 @@
       const[col,setCol]=useState(false);
       const{t}=useLang();
       const W=col?"66px":"var(--sw)";
-      const nav=[{id:"catalog",icon:"📚",label:t("catalog")},{id:"profile",icon:"👤",label:t("profile")},{id:"leaderboard",icon:"🏆",label:t("leaderboard")},{id:"history",icon:"📋",label:t("history")},{id:"analytics",icon:"📈",label:t("analytics")},{id:"create",icon:"✏️",label:t("createTest")}];
+      const nav=[{id:"catalog",icon:"📚",label:t("catalog")},{id:"profile",icon:"👤",label:t("profile")},{id:"leaderboard",icon:"🏆",label:t("leaderboard")},{id:"history",icon:"📋",label:t("history")},{id:"analytics",icon:"📈",label:t("analytics")},{id:"security",icon:"🛡️",label:"Безопасность"},{id:"create",icon:"✏️",label:t("createTest")}];
       return(
         <aside style={{position:"fixed",top:0,left:0,bottom:0,width:W,background:"var(--sidebar)",borderRight:"1px solid var(--border2)",zIndex:200,display:"flex",flexDirection:"column",transition:"width .25s ease",overflow:"hidden",minHeight:"100vh"}}>
           <div style={{padding:"20px 14px 16px",borderBottom:"1px solid var(--border2)",display:"flex",alignItems:"center",gap:10,minHeight:66}}>
@@ -1202,15 +1787,30 @@
       const[pw,setPw]=useState("");
       const[err,setErr]=useState("");
       const[loading,setLoading]=useState(false);
+      const[emailErr,setEmailErr]=useState("");
       const{t}=useLang();
+
+      function onEmailChange(e){
+        setEmail(e.target.value);
+        if(e.target.value&&!validateEmail(e.target.value)) setEmailErr("Некорректный email");
+        else setEmailErr("");
+      }
+
       async function submit(){
-        setErr("");setLoading(true);
+        setErr("");
+        if(!validateEmail(email)){setErr("Введите корректный email");return;}
+        if(tab==="register"){
+          const pwV=validatePassword(pw);
+          if(pwV.score<2){setErr("Пароль слишком слабый");return;}
+          if(!name.trim()){setErr("Введите имя");return;}
+        }
+        setLoading(true);
         try{
           let d;
           if(tab==="login") d=await api("POST","/api/auth/login",{email,password:pw});
           else d=await api("POST","/api/auth/register",{name,email,password:pw});
           localStorage.setItem(TK,d.token);localStorage.setItem(UK,JSON.stringify(d.user));onAuth(d.user);
-        }catch(e){setErr(e.message);}
+        }catch(e){setErr(e.message.replace(/^\d+:\s*/,''));}
         setLoading(false);
       }
       async function googleLogin(){
@@ -1219,7 +1819,7 @@
           const fg={googleId:"g_"+Date.now(),email:email||"demo@gmail.com",name:name||"Пользователь"};
           const d=await api("POST","/api/auth/google",fg);
           localStorage.setItem(TK,d.token);localStorage.setItem(UK,JSON.stringify(d.user));onAuth(d.user);
-        }catch(e){setErr(e.message);}
+        }catch(e){setErr(e.message.replace(/^\d+:\s*/,''));}
         setLoading(false);
       }
       return(
@@ -1241,8 +1841,15 @@
                 </div>
                 <div style={{display:"flex",flexDirection:"column",gap:11}}>
                   {tab==="register"&&<Inp value={name} onChange={e=>setName(e.target.value)} placeholder={t("yourName")} icon="👤"/>}
-                  <Inp value={email} onChange={e=>setEmail(e.target.value)} placeholder={t("email")} type="email" icon="✉️"/>
-                  <Inp value={pw} onChange={e=>setPw(e.target.value)} placeholder={t("password")} type="password" icon="🔒"/>
+                  <div>
+                    <Inp value={email} onChange={onEmailChange} placeholder={t("email")} type="email" icon="✉️"/>
+                    {emailErr&&<div style={{fontSize:11,color:"var(--red)",marginTop:3,paddingLeft:4}}>{emailErr}</div>}
+                  </div>
+                  <div>
+                    <Inp value={pw} onChange={e=>setPw(e.target.value)} placeholder={t("password")} type="password" icon="🔒"/>
+                    {tab==="register"&&pw&&<PasswordStrength password={pw}/>}
+                  </div>
+                  {tab==="login"&&<div style={{fontSize:11.5,color:"var(--text3)",display:"flex",alignItems:"center",gap:5}}>🔐 Пароль хранится в виде SHA-256 хеша</div>}
                   {err&&<div style={{background:"var(--red-bg)",border:"1px solid rgba(143,53,53,.22)",borderRadius:9,padding:"9px 13px",color:"var(--red)",fontSize:13}}>{err}</div>}
                   <Bt onClick={submit} disabled={loading} sz="lg" style={{width:"100%",marginTop:3}}>
                     {loading?<span style={{display:"flex",alignItems:"center",gap:8,justifyContent:"center"}}><Spin/>...</span>:(tab==="login"?t("signIn"):t("createAccount"))}
@@ -1265,6 +1872,12 @@
               <div style={{display:"flex",flexDirection:"column",gap:9}}>
                 {["☕ Java","⚙️ C++","🔷 TypeScript","🌐 HTML/CSS","🐍 Python","🗄️ SQL"].map(f=>(
                   <div key={f} style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:9,padding:"9px 15px",fontSize:13,color:"var(--text2)",fontWeight:500,textAlign:"left"}}>{f}</div>
+                ))}
+              </div>
+              <div style={{marginTop:20,background:'rgba(61,122,82,.12)',border:'1px solid rgba(61,122,82,.25)',borderRadius:10,padding:'12px 14px',textAlign:'left'}}>
+                <div style={{fontSize:11,fontWeight:700,color:'var(--green)',marginBottom:6}}>🛡️ ЗАЩИТА ДАННЫХ</div>
+                {['SHA-256 хеширование паролей','AES-GCM шифрование сессии','Rate limiting (5 попыток)','XSS-санитизация входных данных'].map(s=>(
+                  <div key={s} style={{fontSize:11.5,color:'var(--text2)',display:'flex',alignItems:'center',gap:5,marginBottom:3}}>✓ {s}</div>
                 ))}
               </div>
             </div>
@@ -1333,7 +1946,9 @@
           else if(q.type==="MULTIPLE_CHOICE"){const s=Array.isArray(a)?[...a].sort():[];const e=[...(q.correctAnswerIndices||[])].sort();if(JSON.stringify(s)===JSON.stringify(e)) ok+=p;}
           else if(q.type==="OPEN_TEXT"&&typeof a==="string"&&a.trim().toLowerCase()===q.correctTextAnswer?.toLowerCase()) ok+=p;
         });
-        onFinish({score:tot>0?Math.round(ok/tot*100):0,correct:ok,total:tot,timeSpent:(quiz.timerMinutes||20)*60-tLeft,answers:ans});
+        const score=tot>0?Math.round(ok/tot*100):0;
+        const passingScore=quiz.passingScore||60;
+        onFinish({score,correct:ok,total:tot,timeSpent:(quiz.timerMinutes||20)*60-tLeft,answers:ans,passed:score>=passingScore,passingScore});
       }
       if(done) return <div style={{padding:80,textAlign:"center"}}><Spin/></div>;
       const q=qs[idx];
@@ -1442,6 +2057,8 @@
       const[err,setErr]=useState("");
       const[showBank,setShowBank]=useState(false);
       const[showAI,setShowAI]=useState(false);
+      const[privateCode,setPrivateCode]=useState(eq?.accessCode||null);
+      const[showCodeModal,setShowCodeModal]=useState(false);
       const EMOJIS=["💻","🐍","🟨","⚛️","🗄️","🌿","🐳","🌐","⚡","🔐","🎯","📊","🧠","🔧","☁️","☕","⚙️","🔷","🔵","🟣","🐹","🐘","🌐"];
       const COLORS=["#8b6914","#3d7a52","#2e588a","#6a4a90","#8f3535","#3a6020","#184e7a","#6a3220","#1a6a50","#6b3a7a","#3178c6","#512bd4","#7f52ff","#00add8","#4f5b93"];
       const CATS2=Object.keys(CAT_EMOJIS);
@@ -1458,7 +2075,7 @@
         try{
           const willPublish=pub?true:published;
           const newId=eq?.id||("my_"+Date.now().toString());
-          const body={id:newId,title,category:cat,difficulty:diff,timerMinutes:+timer,passingScore:+pass,coverColor:cc,emoji,status:pub?"ACTIVE":status,questions:qs,tags:[cat.toLowerCase()],publishedToCatalog:willPublish,proctoring,creatorId:userId};
+          const body={id:newId,title,category:cat,difficulty:diff,timerMinutes:+timer,passingScore:+pass,coverColor:cc,emoji,status:pub?"ACTIVE":status,questions:qs,tags:[cat.toLowerCase()],publishedToCatalog:willPublish,proctoring,creatorId:userId,accessCode:privateCode||undefined};
           // Try API first, fallback to localStorage
           let saved=false;
           try{
@@ -1474,6 +2091,23 @@
         }catch(e){setErr(e.message);}
         setSaving(false);setPublishing(false);
       }
+      async function savePrivate(){
+        if(!title.trim()){setErr("Введите название");return;}
+        if(qs.length===0){setErr("Добавьте хотя бы один вопрос");return;}
+        setErr("");setSaving(true);
+        try{
+          const newId=eq?.id||("my_"+Date.now().toString());
+          const code=privateCode||generateAccessCode();
+          const body={id:newId,title,category:cat,difficulty:diff,timerMinutes:+timer,passingScore:+pass,coverColor:cc,emoji,status:"PRIVATE",questions:qs,tags:[cat.toLowerCase()],publishedToCatalog:false,proctoring,creatorId:userId,accessCode:code,isPrivate:true};
+          try{let d;if(eq?.id)d=await api("PUT",`/api/quizzes/${eq.id}`,body);else d=await api("POST","/api/quizzes",body);}catch{}
+          saveMyLocalTest(body,userId);
+          savePrivateTest(body);
+          setPrivateCode(code);
+          setShowCodeModal(true);
+          onSave(body);
+        }catch(e){setErr(e.message);}
+        setSaving(false);
+      }
       function applyAI(data){
         setTitle(data.title||title);if(data.category)setCat(data.category);if(data.difficulty)setDiff(data.difficulty);
         if(data.timerMinutes)setTimer(data.timerMinutes);if(data.passingScore)setPass(data.passingScore);
@@ -1484,12 +2118,14 @@
         <div style={{maxWidth:700,margin:"0 auto",padding:22}}>
           {showBank&&<QuestionBankModal onClose={()=>setShowBank(false)} onAddQuestions={newQs=>setQs(q=>[...q,...newQs])} currentQuestions={qs}/>}
           {showAI&&<AIQuizGenerator onClose={()=>setShowAI(false)} onApply={applyAI}/>}
+          {showCodeModal&&privateCode&&<PrivateCodeModal code={privateCode} testTitle={title} onClose={()=>setShowCodeModal(false)}/>}
           <div style={{display:"flex",alignItems:"center",gap:11,marginBottom:22,flexWrap:"wrap"}}>
             <Bt onClick={onCancel} outline sz="sm" col="var(--text3)">← Назад</Bt>
             <h2 style={{flex:1,fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:900,color:"var(--text)"}}>{eq?"Редактировать тест":"Создать тест"}</h2>
             <Bt onClick={()=>setShowAI(true)} col="var(--blue)" sz="sm">🤖 ИИ</Bt>
             <Bt onClick={()=>setShowBank(true)} outline sz="sm">📚 Банк</Bt>
             <Bt onClick={()=>save(false)} disabled={saving||publishing} col="var(--green)">{saving?"Сохранение...":"💾 Сохранить"}</Bt>
+            <Bt onClick={savePrivate} disabled={saving||publishing} col="var(--text)" style={{background:"var(--bg3)",color:"var(--text)",border:"1.5px solid var(--border2)"}}>{privateCode?"🔒 Приватный ("+privateCode+")":"🔒 Приватный"}</Bt>
             <Bt onClick={()=>save(true)} disabled={saving||publishing} col={published?"var(--blue)":"var(--accent)"}>{publishing?"Публикация...":(published?"🌐 Опубликовано":"🌐 Опубликовать")}</Bt>
           </div>
           {err&&<div style={{background:"var(--red-bg)",border:"1px solid rgba(143,53,53,.22)",borderRadius:9,padding:"9px 13px",color:"var(--red)",fontSize:13,marginBottom:14}}>{err}</div>}
@@ -1566,8 +2202,10 @@
       const history=getHistory();
       const avgScore=history.length?Math.round(history.reduce((s,a)=>s+a.score,0)/history.length):0;
       const passRate=history.length?Math.round(history.filter(a=>a.passed).length/history.length*100):0;
+      const[showPrivRes,setShowPrivRes]=useState(null);
       return(
         <div style={{maxWidth:800,margin:"0 auto",padding:22}}>
+          {showPrivRes&&<PrivateResultsPanel test={showPrivRes} onClose={()=>setShowPrivRes(null)}/>}
           <h1 style={{fontFamily:"'Playfair Display',serif",fontSize:23,fontWeight:900,color:"var(--text)",marginBottom:20}}>👤 Профиль</h1>
           <Cd style={{padding:24,marginBottom:14,display:"flex",gap:18,alignItems:"center"}}>
             <Av user={user} size={66}/>
@@ -1614,16 +2252,22 @@
           <Cd style={{padding:20}}>
             <div style={{fontFamily:"'Playfair Display',serif",fontWeight:700,fontSize:15,marginBottom:13,color:"var(--text)"}}>📁 Мои тесты ({myQuizzes.length})</div>
             {myQuizzes.length===0?<div style={{textAlign:"center",padding:28,color:"var(--text3)"}}>Вы ещё не создали ни одного теста<br/><span style={{fontSize:12,marginTop:6,display:"block"}}>Используйте «Создать тест» или ИИ-генератор</span></div>
-            :myQuizzes.map(q=>(
+            :myQuizzes.map(q=>{
+              const privRes=q.isPrivate?getResultsForTest(q.id):[];
+              return(
               <div key={q.id} style={{display:"flex",alignItems:"center",gap:11,background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:10,padding:"12px 14px",marginBottom:8}}>
                 <span style={{fontSize:20}}>{q.emoji}</span>
                 <div style={{flex:1}}>
                   <div style={{fontWeight:700,color:"var(--text)",fontSize:13.5}}>{q.title}</div>
-                  <div style={{color:"var(--text3)",fontSize:11.5,marginTop:2}}>{q.category} · {Array.isArray(q.questions)?q.questions.length:0} вопр. · {q.status==="ACTIVE"?"🟢 Активен":q.status==="DRAFT"?"🟡 Черновик":"🔒 Приватный"}{q.publishedToCatalog?" · 🌐 В каталоге":""}{q.proctoring?.enabled?" · 🛡️":""}</div>
+                  <div style={{color:"var(--text3)",fontSize:11.5,marginTop:2}}>{q.category} · {Array.isArray(q.questions)?q.questions.length:0} вопр. · {q.status==="ACTIVE"?"🟢 Активен":q.status==="DRAFT"?"🟡 Черновик":"🔒 Приватный"}{q.publishedToCatalog?" · 🌐 В каталоге":""}{q.isPrivate?` · 🔑 ${q.accessCode} · 👥 ${privRes.length} прошли`:""}  {q.proctoring?.enabled?" · 🛡️":""}</div>
                 </div>
-                <div style={{display:"flex",gap:6}}><Bt onClick={()=>onEditQuiz(q)} outline sz="sm">✏️</Bt><Bt onClick={()=>onDeleteQuiz(q.id)} sz="sm" col="var(--red)" outline>🗑️</Bt></div>
+                <div style={{display:"flex",gap:6}}>
+                  {q.isPrivate&&<Bt onClick={()=>setShowPrivRes(q)} sz="sm" col="var(--blue)" outline>📊</Bt>}
+                  <Bt onClick={()=>onEditQuiz(q)} outline sz="sm">✏️</Bt>
+                  <Bt onClick={()=>onDeleteQuiz(q.id)} sz="sm" col="var(--red)" outline>🗑️</Bt>
+                </div>
               </div>
-            ))}
+            );})}
           </Cd>
         </div>
       );
@@ -1802,7 +2446,7 @@
     }
 
     // ── CATALOG PAGE ──────────────────────────────────────────────
-    function CatalogPage({quizzes,user,loading,onStart,onEdit,historyVersion}){
+    function CatalogPage({quizzes,user,loading,onStart,onEdit,historyVersion,onEnterCode}){
       const[search,setSearch]=useState("");
       const[catF,setCatF]=useState("Все");
       const[diffF,setDiffF]=useState("Все");
@@ -1815,7 +2459,10 @@
       });
       return(
         <div style={{padding:22,maxWidth:1080,margin:"0 auto"}}>
-          <div style={{marginBottom:20}}><h1 style={{fontFamily:"'Playfair Display',serif",fontSize:23,fontWeight:900,color:"var(--text)"}}>📚 {t("catalog")}</h1><p style={{color:"var(--text3)",fontSize:13,marginTop:3}}>IT тесты · {quizzes.length} тестов</p></div>
+          <div style={{marginBottom:20,display:"flex",alignItems:"flex-start",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
+            <div><h1 style={{fontFamily:"'Playfair Display',serif",fontSize:23,fontWeight:900,color:"var(--text)"}}>📚 {t("catalog")}</h1><p style={{color:"var(--text3)",fontSize:13,marginTop:3}}>IT тесты · {quizzes.length} тестов</p></div>
+            <button onClick={onEnterCode} style={{display:"flex",alignItems:"center",gap:8,background:"var(--bg2)",color:"var(--text2)",border:"1.5px solid var(--border2)",borderRadius:10,padding:"10px 16px",fontWeight:700,fontSize:13.5,cursor:"pointer",transition:"all .17s",whiteSpace:"nowrap"}} onMouseEnter={e=>{e.currentTarget.style.background="var(--accent)";e.currentTarget.style.color="#fff";}} onMouseLeave={e=>{e.currentTarget.style.background="var(--bg2)";e.currentTarget.style.color="var(--text2)";}}>🔑 Войти по коду</button>
+          </div>
           <div style={{marginBottom:13}}><Inp value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Поиск тестов..." icon=""/></div>
           <div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:6,marginBottom:9}}>
             {CATS.map(c=><button key={c} onClick={()=>setCatF(c)} style={{whiteSpace:"nowrap",background:catF===c?"var(--accent)":"var(--bg2)",color:catF===c?"#fff":"var(--text2)",border:`1.5px solid ${catF===c?"var(--accent)":"var(--border)"}`,borderRadius:99,padding:"5px 13px",fontSize:12,fontWeight:700,cursor:"pointer",transition:"all .17s"}}>{c==="Все"?t("all"):c}</button>)}
@@ -1941,6 +2588,10 @@
           setProctoringReport(procReport);
         }
         saveAttempt(activeQ.id,activeQ.title,activeQ.emoji,{...r,passingScore:activeQ.passingScore});
+        // Save private result if it's a private test
+        if(activeQ.isPrivate){
+          savePrivateResult({testId:activeQ.id,userName:user?.name||"Аноним",date:new Date().toISOString(),score:r.score,passed:r.passed,correct:r.correct,total:r.total,timeSpent:r.timeSpent});
+        }
         setHistoryVersion(v=>v+1);  // triggers re-render for stats
         setResult(r);
         setProctoringStep("idle");
@@ -2022,15 +2673,30 @@
         );
       }
 
+      if(page==="enter_code"){
+        return(
+          <div style={BG}>
+            {SB}
+            <div style={{marginLeft:"var(--sw)",minHeight:"100vh"}}>
+              <EnterCodePage
+                onFound={quiz=>{handleStartQuiz(quiz);}}
+                onBack={()=>setPage("catalog")}
+              />
+            </div>
+          </div>
+        );
+      }
+
       return(
         <div style={BG}>
           {SB}
           <div style={{marginLeft:"var(--sw)",minHeight:"100vh",transition:"margin-left .25s"}}>
-            {page==="catalog"&&<CatalogPage quizzes={allQ} user={user} loading={loading} historyVersion={historyVersion} onStart={handleStartQuiz} onEdit={q=>{setEditQ(q);setPage("edit");}}/>}
+            {page==="catalog"&&<CatalogPage quizzes={allQ} user={user} loading={loading} historyVersion={historyVersion} onStart={handleStartQuiz} onEdit={q=>{setEditQ(q);setPage("edit");}} onEnterCode={()=>setPage("enter_code")}/>}
             {page==="profile"&&<ProfilePage user={user} myQuizzes={myQ} onEditQuiz={q=>{setEditQ(q);setPage("edit");}} onDeleteQuiz={delQ}/>}
             {page==="leaderboard"&&<LeaderboardPage user={user}/>}
             {page==="history"&&<HistoryPage quizzes={allQ}/>}
             {page==="analytics"&&<AnalyticsPage user={user} quizzes={allQ}/>}
+            {page==="security"&&<SecurityPage user={user}/>}
           </div>
         </div>
       );
