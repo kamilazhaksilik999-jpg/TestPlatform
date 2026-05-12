@@ -1057,6 +1057,11 @@
     function Av({user,size=38}){
       const cs=["#8b6914","#3d7a52","#2e588a","#6a4a90","#8f3535"];
       const c=cs[Math.abs((user?.name||"").charCodeAt(0)||0)%cs.length];
+      if(user?.avatarPhoto){
+        return <div style={{width:size,height:size,borderRadius:"50%",flexShrink:0,overflow:"hidden",border:"2.5px solid var(--border2)"}}>
+          <img src={user.avatarPhoto} alt="avatar" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+        </div>;
+      }
       return <div style={{width:size,height:size,borderRadius:"50%",background:c,display:"flex",alignItems:"center",justifyContent:"center",fontSize:size*.38,flexShrink:0,color:"#fff",fontWeight:700}}>{user?.avatarEmoji||"☕"}</div>;
     }
     function Cd({children,style={},onClick}){
@@ -2195,6 +2200,139 @@
     }
 
     // ── PROFILE PAGE ──────────────────────────────────────────────
+    // ── AVATAR PICKER MODAL ───────────────────────────────────────
+    const AVATAR_GALLERY=[
+      // Милые животные
+      {g:"🐾 Животные",items:["🐱","🐶","🐰","🐻","🐼","🐨","🦊","🐯","🦁","🐸","🐧","🦋","🦄","🐺","🐮","🐷","🦔","🐭","🐹","🦝"]},
+      // Фрукты и еда
+      {g:"🍓 Еда",items:["🍓","🍑","🍒","🍇","🍊","🍋","🥝","🍰","🧁","🍩","🧋","☕","🍵","🍪","🍫","🍭","🌸","🎂","🍦","🧃"]},
+      // Природа
+      {g:"🌿 Природа",items:["🌸","🌺","🌻","🌹","🌷","🍀","🌿","🍁","🌊","⭐","🌙","☀️","🌈","❄️","🔥","💧","🌴","🍄","🌵","🦋"]},
+      // Магия и фэнтези
+      {g:"✨ Магия",items:["✨","🔮","🪄","💫","🌟","⚡","🎭","🎪","🎨","🎸","🎵","🎮","🕹️","🎯","🎲","🃏","🧿","💎","🪩","🦄"]},
+      // Еmoji лица
+      {g:"😊 Эмоции",items:["😊","🥰","😎","🤩","😇","🥳","😺","🙈","🤠","👻","🐙","🦖","🦕","🌚","🌝","👾","🤖","🐉","🦩","🎃"]},
+    ];
+
+    function AvatarPickerModal({user,onSave,onClose}){
+      const[tab,setTab]=useState("gallery");
+      const[selected,setSelected]=useState(user?.avatarEmoji||"☕");
+      const[photoPreview,setPhotoPreview]=useState(user?.avatarPhoto||null);
+      const[activeGroup,setActiveGroup]=useState(0);
+      const fileRef=useRef();
+
+      function handleFile(e){
+        const file=e.target.files?.[0];
+        if(!file) return;
+        if(file.size>2*1024*1024){alert("Файл слишком большой. Максимум 2 МБ.");return;}
+        const reader=new FileReader();
+        reader.onload=ev=>{setPhotoPreview(ev.target.result);setTab("upload");};
+        reader.readAsDataURL(file);
+      }
+
+      function save(){
+        if(tab==="upload"&&photoPreview){
+          onSave({avatarPhoto:photoPreview,avatarEmoji:null});
+        } else {
+          onSave({avatarEmoji:selected,avatarPhoto:null});
+        }
+        onClose();
+      }
+
+      const previewUser=tab==="upload"&&photoPreview
+        ?{...user,avatarPhoto:photoPreview,avatarEmoji:null}
+        :{...user,avatarEmoji:selected,avatarPhoto:null};
+
+      return(
+        <div style={{position:"fixed",inset:0,zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <div onClick={onClose} style={{position:"absolute",inset:0,background:"rgba(0,0,0,.55)",backdropFilter:"blur(8px)"}}/>
+          <div className="pi" style={{position:"relative",background:"var(--card)",borderRadius:24,padding:"28px 24px",width:"min(94vw,520px)",boxShadow:"0 32px 100px rgba(0,0,0,.35)",maxHeight:"85vh",overflow:"hidden",display:"flex",flexDirection:"column"}}>
+            {/* Header */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+              <div style={{fontFamily:"'Playfair Display',serif",fontSize:19,fontWeight:900,color:"var(--text)"}}>🎨 Выбор аватарки</div>
+              <button onClick={onClose} style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:8,width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",fontSize:16,color:"var(--text3)"}}>✕</button>
+            </div>
+
+            {/* Preview */}
+            <div style={{display:"flex",justifyContent:"center",marginBottom:20}}>
+              <div style={{position:"relative"}}>
+                <Av user={previewUser} size={82}/>
+                <div style={{position:"absolute",bottom:-2,right:-2,background:"var(--accent)",borderRadius:"50%",width:22,height:22,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"#fff",border:"2px solid var(--card)"}}>✏️</div>
+              </div>
+            </div>
+
+            {/* Tabs */}
+            <div style={{display:"flex",gap:8,marginBottom:18}}>
+              {[["gallery","🖼️ Галерея"],["upload","📷 Своя фото"]].map(([t,l])=>(
+                <button key={t} onClick={()=>setTab(t)}
+                  style={{flex:1,padding:"9px",borderRadius:10,border:`2px solid ${tab===t?"var(--accent)":"var(--border)"}`,background:tab===t?"var(--accent-bg)":"transparent",color:tab===t?"var(--accent)":"var(--text3)",fontWeight:700,fontSize:13,cursor:"pointer",transition:"all .18s"}}>
+                  {l}
+                </button>
+              ))}
+            </div>
+
+            {/* Gallery Tab */}
+            {tab==="gallery"&&(
+              <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+                {/* Group tabs */}
+                <div style={{display:"flex",gap:6,marginBottom:12,overflowX:"auto",paddingBottom:4,flexShrink:0}}>
+                  {AVATAR_GALLERY.map((g,i)=>(
+                    <button key={i} onClick={()=>setActiveGroup(i)}
+                      style={{whiteSpace:"nowrap",padding:"5px 12px",borderRadius:99,border:`1.5px solid ${activeGroup===i?"var(--accent)":"var(--border)"}`,background:activeGroup===i?"var(--accent-bg)":"var(--bg2)",color:activeGroup===i?"var(--accent)":"var(--text3)",fontWeight:600,fontSize:11.5,cursor:"pointer",transition:"all .15s",flexShrink:0}}>
+                      {g.g}
+                    </button>
+                  ))}
+                </div>
+                {/* Emoji grid */}
+                <div style={{overflowY:"auto",flex:1}}>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8}}>
+                    {AVATAR_GALLERY[activeGroup].items.map(em=>(
+                      <button key={em} onClick={()=>{setSelected(em);setTab("gallery");}}
+                        style={{aspectRatio:"1",borderRadius:14,border:`2.5px solid ${selected===em&&tab==="gallery"?"var(--accent)":"var(--border)"}`,background:selected===em&&tab==="gallery"?"var(--accent-bg)":"var(--bg2)",fontSize:28,cursor:"pointer",transition:"all .15s",display:"flex",alignItems:"center",justifyContent:"center",transform:selected===em&&tab==="gallery"?"scale(1.12)":"scale(1)"}}>
+                        {em}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Upload Tab */}
+            {tab==="upload"&&(
+              <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:14}}>
+                <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{display:"none"}}/>
+                {photoPreview?(
+                  <div style={{textAlign:"center"}}>
+                    <div style={{width:110,height:110,borderRadius:"50%",overflow:"hidden",border:"3px solid var(--accent)",margin:"0 auto 14px",boxShadow:"var(--shadow2)"}}>
+                      <img src={photoPreview} alt="preview" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                    </div>
+                    <p style={{fontSize:12,color:"var(--text3)",marginBottom:14}}>Выглядит отлично! Нажмите «Сохранить» или выберите другое фото.</p>
+                    <button onClick={()=>fileRef.current.click()} style={{background:"var(--bg2)",border:"1.5px solid var(--border)",borderRadius:10,padding:"9px 20px",fontSize:13,fontWeight:600,color:"var(--text2)",cursor:"pointer"}}>
+                      📂 Выбрать другое
+                    </button>
+                  </div>
+                ):(
+                  <div onClick={()=>fileRef.current.click()} style={{border:"2px dashed var(--border2)",borderRadius:18,padding:"36px 24px",textAlign:"center",cursor:"pointer",transition:"all .2s",width:"100%",background:"var(--bg2)"}}>
+                    <div style={{fontSize:48,marginBottom:12}}>📷</div>
+                    <div style={{fontWeight:700,color:"var(--text)",marginBottom:6,fontSize:14}}>Загрузить фото</div>
+                    <div style={{fontSize:12,color:"var(--text3)"}}>Нажмите чтобы выбрать файл<br/>JPG, PNG, GIF · до 2 МБ</div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Save button */}
+            <div style={{marginTop:20,display:"flex",gap:10}}>
+              <button onClick={onClose} style={{flex:"0 0 auto",background:"var(--bg2)",border:"1.5px solid var(--border)",borderRadius:11,padding:"11px 20px",fontWeight:700,fontSize:14,cursor:"pointer",color:"var(--text2)"}}>Отмена</button>
+              <button onClick={save} style={{flex:1,background:"var(--accent)",border:"none",borderRadius:11,padding:"11px",fontWeight:700,fontSize:14,cursor:"pointer",color:"#fff"}}>
+                ✅ Сохранить аватарку
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     function ProfilePage({user,myQuizzes,onEditQuiz,onDeleteQuiz}){
       const pts=user.totalPoints||0;
       const ranks=[[100,"🌱 Новичок"],[500,"📖 Ученик"],[1000,"🎓 Студент"],[2500,"⭐ Знаток"],[5000,"🏅 Эксперт"],[10000,"💎 Мастер"]];
@@ -2203,16 +2341,60 @@
       const avgScore=history.length?Math.round(history.reduce((s,a)=>s+a.score,0)/history.length):0;
       const passRate=history.length?Math.round(history.filter(a=>a.passed).length/history.length*100):0;
       const[showPrivRes,setShowPrivRes]=useState(null);
+      const[showAvatarPicker,setShowAvatarPicker]=useState(false);
+      const[localUser,setLocalUser]=useState(user);
+
+      function handleAvatarSave({avatarEmoji,avatarPhoto}){
+        // Update in users DB
+        const users=getUsersDB();
+        const idx=users.findIndex(u=>u.id===user.id);
+        if(idx>=0){
+          users[idx].avatarEmoji=avatarEmoji||users[idx].avatarEmoji;
+          users[idx].avatarPhoto=avatarPhoto||null;
+          if(avatarEmoji) users[idx].avatarPhoto=null;
+          saveUsersDB(users);
+        }
+        // Update localStorage user object
+        const stored=localStorage.getItem(UK);
+        if(stored){
+          try{
+            const u=JSON.parse(stored);
+            if(avatarPhoto){u.avatarPhoto=avatarPhoto;u.avatarEmoji=null;}
+            else{u.avatarEmoji=avatarEmoji;u.avatarPhoto=null;}
+            localStorage.setItem(UK,JSON.stringify(u));
+          }catch{}
+        }
+        setLocalUser(prev=>avatarPhoto?{...prev,avatarPhoto,avatarEmoji:null}:{...prev,avatarEmoji,avatarPhoto:null});
+      }
+
+      const displayUser={...localUser};
+
       return(
         <div style={{maxWidth:800,margin:"0 auto",padding:22}}>
           {showPrivRes&&<PrivateResultsPanel test={showPrivRes} onClose={()=>setShowPrivRes(null)}/>}
+          {showAvatarPicker&&<AvatarPickerModal user={displayUser} onSave={handleAvatarSave} onClose={()=>setShowAvatarPicker(false)}/>}
           <h1 style={{fontFamily:"'Playfair Display',serif",fontSize:23,fontWeight:900,color:"var(--text)",marginBottom:20}}>👤 Профиль</h1>
           <Cd style={{padding:24,marginBottom:14,display:"flex",gap:18,alignItems:"center"}}>
-            <Av user={user} size={66}/>
+            {/* Avatar with edit button */}
+            <div style={{position:"relative",flexShrink:0}}>
+              <Av user={displayUser} size={72}/>
+              <button onClick={()=>setShowAvatarPicker(true)}
+                style={{position:"absolute",bottom:-2,right:-2,background:"var(--accent)",border:"2.5px solid var(--card)",borderRadius:"50%",width:26,height:26,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,cursor:"pointer",color:"#fff",transition:"transform .15s"}}
+                title="Изменить аватарку">
+                ✏️
+              </button>
+            </div>
             <div style={{flex:1}}>
-              <div style={{fontFamily:"'Playfair Display',serif",fontWeight:800,fontSize:20,color:"var(--text)"}}>{user.name}</div>
-              <div style={{color:"var(--accent)",fontSize:12.5,marginBottom:6}}>{user.email}</div>
-              <div style={{display:"flex",gap:6,flexWrap:"wrap"}}><Bdg label={user.rankLabel||"🌱 Новичок"} color="var(--accent)" bg="var(--accent-bg)"/><Bdg label={`${pts} очков`} color="var(--blue)" bg="var(--blue-bg)"/></div>
+              <div style={{fontFamily:"'Playfair Display',serif",fontWeight:800,fontSize:20,color:"var(--text)"}}>{displayUser.name}</div>
+              <div style={{color:"var(--accent)",fontSize:12.5,marginBottom:6}}>{displayUser.email}</div>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+                <Bdg label={displayUser.rankLabel||"🌱 Новичок"} color="var(--accent)" bg="var(--accent-bg)"/>
+                <Bdg label={`${pts} очков`} color="var(--blue)" bg="var(--blue-bg)"/>
+              </div>
+              <button onClick={()=>setShowAvatarPicker(true)}
+                style={{background:"var(--bg2)",border:"1.5px solid var(--border)",borderRadius:8,padding:"5px 12px",fontSize:11.5,fontWeight:600,color:"var(--text3)",cursor:"pointer",display:"inline-flex",alignItems:"center",gap:5}}>
+                🎨 Изменить аватарку
+              </button>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,textAlign:"center"}}>
               <div style={{background:"var(--bg2)",borderRadius:9,padding:"11px 14px",border:"1px solid var(--border)"}}><div style={{fontFamily:"'Playfair Display',serif",fontSize:21,fontWeight:900,color:"var(--accent)"}}>{myQuizzes.length}</div><div style={{fontSize:10.5,color:"var(--text3)",marginTop:2}}>Тестов создано</div></div>
