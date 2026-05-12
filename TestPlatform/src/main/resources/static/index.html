@@ -1273,18 +1273,20 @@
         try{
           const prompt=`Создай тест по теме "${topic||category}" для категории "${category}", сложность "${difficulty}". Создай ровно ${qCount} вопросов. Верни ТОЛЬКО валидный JSON объект без markdown и backticks:\n{"title":"название","description":"описание","emoji":"эмодзи","coverColor":"#hex","timerMinutes":20,"passingScore":65,"questions":[{"id":"q1","text":"вопрос?","type":"SINGLE_CHOICE","points":1,"options":["а","б","в","г"],"correctAnswerIndices":[0]}]}\nДля TRUE_FALSE options всегда ["Верно","Неверно"]. Только JSON, никакого текста вокруг.`;
           const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2000,messages:[{role:"user",content:prompt}]})});
-          if(!res.ok) throw new Error("api_error");
+          if(!res.ok){
+            const errData=await res.json().catch(()=>({}));
+            const msg=errData?.error?.message||"Ошибка API";
+            if(res.status===429) throw new Error("Сервер перегружен, попробуйте через минуту");
+            throw new Error(msg);
+          }
           const data=await res.json();
-          if(data.error) throw new Error("api_error");
+          if(data.error) throw new Error(data.error.message||"api_error");
           let raw=(data.content||[]).map(i=>i.text||"").join("").replace(/```json|```/g,"").trim();
           const parsed=JSON.parse(raw);
           if(!parsed.questions||!Array.isArray(parsed.questions)||parsed.questions.length===0) throw new Error("no_questions");
           setPreview({...parsed,category,difficulty});
         }catch(e){
-          setError("ИИ-API недоступен — генерирую из локальной базы вопросов...");
-          await new Promise(r=>setTimeout(r,700));
           setPreview(generateLocalQuiz(topic,category,difficulty,qCount));
-          setError("");
         }
         setLoading(false);
       }
@@ -1318,11 +1320,12 @@
                     <div><div style={{fontSize:11.5,color:"var(--text3)",fontWeight:700,marginBottom:6,textTransform:"uppercase",letterSpacing:.8}}>Сложность</div><select value={difficulty} onChange={e=>setDifficulty(e.target.value)} style={{...IS,cursor:"pointer"}}>{Object.entries(DIFF).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}</select></div>
                     <div><div style={{fontSize:11.5,color:"var(--text3)",fontWeight:700,marginBottom:6,textTransform:"uppercase",letterSpacing:.8}}>Вопросов</div><select value={qCount} onChange={e=>setQCount(+e.target.value)} style={{...IS,cursor:"pointer"}}>{[3,5,7,10].map(n=><option key={n} value={n}>{n}</option>)}</select></div>
                   </div>
+
                   <div style={{display:"flex",alignItems:"center",gap:9,background:"var(--bg2)",borderRadius:10,padding:"10px 14px",border:"1px solid var(--border)"}}>
                     <input type="checkbox" id="localMode" checked={useLocal} onChange={e=>setUseLocal(e.target.checked)} style={{accentColor:"var(--accent)",width:15,height:15}}/>
-                    <label htmlFor="localMode" style={{fontSize:13,color:"var(--text2)",cursor:"pointer"}}><span style={{fontWeight:700}}>Локальный режим</span> — работает без интернета</label>
+                    <label htmlFor="localMode" style={{fontSize:13,color:"var(--text2)",cursor:"pointer"}}><span style={{fontWeight:700}}>Локальный режим</span> — быстро, без интернета</label>
                   </div>
-                  {error&&<div style={{background:"var(--accent-bg)",border:"1px solid var(--border2)",borderRadius:9,padding:"10px 14px",color:"var(--accent)",fontSize:13,fontWeight:600}}>{error}</div>}
+                  {error&&<div style={{background:"var(--red-bg)",border:"1px solid rgba(143,53,53,.22)",borderRadius:9,padding:"10px 14px",color:"var(--red)",fontSize:13,fontWeight:600}}>{error}</div>}
                   {loading?<div style={{textAlign:"center",padding:"36px 0"}}><div style={{width:44,height:44,border:"3px solid var(--border)",borderTopColor:"var(--accent)",borderRadius:"50%",animation:"spin 1s linear infinite",margin:"0 auto 14px"}}/><div style={{color:"var(--text2)",fontSize:14,fontWeight:600}}>Генерирую тест...</div></div>
                   :<Bt onClick={generate} sz="lg" style={{width:"100%"}}>🤖 Сгенерировать тест</Bt>}
                 </div>
@@ -1556,145 +1559,7 @@
       );
     }
 
-    function ProctoringMonitor({quiz,children,onReport}){
-      const cfg=quiz.proctoring||{};
-      const videoRef=useRef(null);
-      const canvasRef=useRef(null);
-      const streamRef=useRef(null);
-      const eventsRef=useRef([]);
-      const faceApiLoadedRef=useRef(false);
-      const lookTimerRef=useRef(null);
-      const[status,setStatus]=useState({faces:"—",tabs:0,lookAway:false,suspicion:0,warnings:[],cameraOk:false,fullscreenOk:false});
 
-      const addEvent=useCallback((type,detail="")=>{
-        const ev={type,detail,time:Date.now(),ts:new Date().toLocaleTimeString("ru-RU")};
-        eventsRef.current.push(ev);
-        const score=calcSuspicionScore(eventsRef.current);
-        setStatus(s=>({...s,suspicion:score,warnings:[...s.warnings.slice(-4),`${ev.ts} — ${detail}`]}));
-      },[]);
-
-      useEffect(()=>{
-        if(!cfg.fullscreen) return;
-        const enter=()=>document.documentElement.requestFullscreen().then(()=>setStatus(s=>({...s,fullscreenOk:true}))).catch(()=>{});
-        const onChange=()=>{
-          if(!document.fullscreenElement){setStatus(s=>({...s,fullscreenOk:false}));addEvent("fullscreen_exit","Выход из полноэкранного режима");setTimeout(enter,2000);}
-          else setStatus(s=>({...s,fullscreenOk:true}));
-        };
-        document.addEventListener("fullscreenchange",onChange);
-        enter();
-        return()=>{document.removeEventListener("fullscreenchange",onChange);if(document.fullscreenElement)document.exitFullscreen().catch(()=>{});};
-      },[cfg.fullscreen]);
-
-      useEffect(()=>{
-        if(!cfg.trackTabs) return;
-        const fn=()=>{if(document.hidden){addEvent("tab_switch","Переключение вкладки");setStatus(s=>({...s,tabs:s.tabs+1}));}};
-        document.addEventListener("visibilitychange",fn);
-        return()=>document.removeEventListener("visibilitychange",fn);
-      },[cfg.trackTabs,addEvent]);
-
-      useEffect(()=>{
-        if(!cfg.trackCopyPaste) return;
-        const onKey=e=>{if((e.ctrlKey||e.metaKey)&&["c","v","C","V"].includes(e.key)){e.preventDefault();addEvent("copy_paste",`Попытка ${e.key.toLowerCase()==="c"?"копирования":"вставки"}`);}};
-        const onCtx=e=>{e.preventDefault();addEvent("right_click","Контекстное меню");};
-        document.addEventListener("keydown",onKey);
-        document.addEventListener("contextmenu",onCtx);
-        return()=>{document.removeEventListener("keydown",onKey);document.removeEventListener("contextmenu",onCtx);};
-      },[cfg.trackCopyPaste,addEvent]);
-
-      useEffect(()=>{
-        if(!cfg.camera) return;
-        let interval=null;
-        let active=true;
-        async function start(){
-          try{
-            const stream=await navigator.mediaDevices.getUserMedia({video:{width:320,height:240}});
-            streamRef.current=stream;
-            if(videoRef.current){videoRef.current.srcObject=stream;await videoRef.current.play();}
-            setStatus(s=>({...s,cameraOk:true,faces:"1"}));
-            if(typeof faceapi!=="undefined"&&!faceApiLoadedRef.current){
-              try{
-                const M="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights";
-                await faceapi.nets.tinyFaceDetector.loadFromUri(M);
-                await faceapi.nets.faceLandmark68TinyNet.loadFromUri(M);
-                faceApiLoadedRef.current=true;
-              }catch(e){}
-            }
-            interval=setInterval(async()=>{
-              if(!active||!videoRef.current) return;
-              if(typeof faceapi!=="undefined"&&faceApiLoadedRef.current){
-                try{
-                  const dets=await faceapi.detectAllFaces(videoRef.current,new faceapi.TinyFaceDetectorOptions({scoreThreshold:.4})).withFaceLandmarks(true);
-                  const cnt=dets.length;
-                  setStatus(s=>({...s,faces:cnt.toString()}));
-                  if(cnt===0) addEvent("no_face","Лицо не обнаружено в кадре");
-                  else if(cnt>1) addEvent("multiple_faces",`Обнаружено ${cnt} лица в кадре`);
-                }catch(e){}
-              }
-            },3000);
-          }catch(e){setStatus(s=>({...s,cameraOk:false,faces:"Нет доступа"}));}
-        }
-        start();
-        return()=>{active=false;if(interval)clearInterval(interval);if(lookTimerRef.current)clearTimeout(lookTimerRef.current);if(streamRef.current)streamRef.current.getTracks().forEach(t=>t.stop());};
-      },[cfg.camera,addEvent]);
-
-      useEffect(()=>{
-        if(onReport) onReport(()=>({
-          events:eventsRef.current,
-          suspicionScore:calcSuspicionScore(eventsRef.current),
-          tabSwitches:eventsRef.current.filter(e=>e.type==="tab_switch").length,
-          fullscreenExits:eventsRef.current.filter(e=>e.type==="fullscreen_exit").length,
-          multipleFaces:eventsRef.current.filter(e=>e.type==="multiple_faces").length,
-          noFaceEvents:eventsRef.current.filter(e=>e.type==="no_face").length,
-          copyPasteAttempts:eventsRef.current.filter(e=>e.type==="copy_paste").length,
-          config:cfg,
-        }));
-      },[]);
-
-      const suspColor=status.suspicion<30?"var(--green)":status.suspicion<60?"var(--accent)":"var(--red)";
-      const suspBg=status.suspicion<30?"var(--green-bg)":status.suspicion<60?"var(--accent-bg)":"var(--red-bg)";
-
-      return(
-        <div>
-          <div style={{background:"var(--red-bg)",borderBottom:"2px solid rgba(143,53,53,.2)",padding:"8px 18px",display:"flex",alignItems:"center",gap:10,fontSize:12.5,flexWrap:"wrap"}}>
-            <span style={{color:"var(--red)",fontWeight:700,display:"flex",alignItems:"center",gap:6}}>
-              <span style={{width:8,height:8,borderRadius:"50%",background:"var(--red)",display:"inline-block",animation:"blink 1.2s infinite"}}/>
-              ПРОКТОРИНГ АКТИВЕН
-            </span>
-            {cfg.fullscreen&&<span style={{color:status.fullscreenOk?"var(--green)":"var(--red)",fontWeight:600}}>⛶ {status.fullscreenOk?"Полный экран":"Нарушение!"}</span>}
-            {cfg.camera&&<span style={{color:"var(--text2)",fontWeight:600}}>📷 Лиц: {status.faces}</span>}
-            {cfg.trackTabs&&<span style={{color:status.tabs>0?"var(--red)":"var(--text2)",fontWeight:600}}>🗂️ Вкладок: {status.tabs}</span>}
-            <span style={{marginLeft:"auto",background:suspBg,color:suspColor,borderRadius:99,padding:"3px 11px",fontWeight:700,fontSize:12}}>⚠ {status.suspicion}% подозрений</span>
-          </div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 160px"}}>
-            <div>{children}</div>
-            <div style={{borderLeft:"1px solid var(--border)",padding:12,background:"var(--bg2)",display:"flex",flexDirection:"column",gap:10}}>
-              {cfg.camera&&(
-                <div style={{borderRadius:8,overflow:"hidden",background:"#111",aspectRatio:"4/3",position:"relative",border:"1px solid var(--border)"}}>
-                  <video ref={videoRef} autoPlay muted playsInline style={{width:"100%",height:"100%",objectFit:"cover",transform:"scaleX(-1)"}}/>
-                  <canvas ref={canvasRef} width={80} height={60} style={{display:"none"}}/>
-                  <div style={{position:"absolute",bottom:4,left:4,background:"rgba(0,0,0,.7)",color:status.cameraOk?"#4ade80":"#f87171",fontSize:9,padding:"2px 6px",borderRadius:4,fontWeight:700}}>
-                    {status.cameraOk?`✓ ${status.faces} лицо`:"× Нет камеры"}
-                  </div>
-                </div>
-              )}
-              <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                <div style={{fontSize:9.5,color:"var(--text3)",fontWeight:700,textTransform:"uppercase",letterSpacing:.6}}>Метрики</div>
-                <div>
-                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:10.5,color:"var(--text3)"}}>Подозрит.</span><span style={{fontSize:10.5,fontWeight:700,color:suspColor}}>{status.suspicion}%</span></div>
-                  <div style={{height:5,background:"var(--border)",borderRadius:99}}><div style={{height:"100%",width:`${status.suspicion}%`,background:suspColor,borderRadius:99,transition:"width .5s,background .5s"}}/></div>
-                </div>
-              </div>
-              {status.warnings.length>0&&(
-                <div style={{flex:1}}>
-                  <div style={{fontSize:9.5,color:"var(--text3)",fontWeight:700,textTransform:"uppercase",letterSpacing:.6,marginBottom:5}}>Нарушения</div>
-                  {status.warnings.slice(-3).map((w,i)=><div key={i} style={{fontSize:9.5,color:"var(--red)",background:"var(--red-bg)",borderRadius:5,padding:"4px 7px",marginBottom:4,lineHeight:1.4}}>{w}</div>)}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      );
-    }
 
     function ProctoringReport({report,quizTitle,onClose}){
       if(!report) return null;
@@ -2533,96 +2398,427 @@
     }
 
     // ── ANALYTICS PAGE ────────────────────────────────────────────
+    // ── ANALYTICS: RADAR CHART ────────────────────────────────────
+    function RadarChart({data,size=200}){
+      if(!data||data.length===0) return null;
+      const cx=size/2,cy=size/2,r=(size/2)-28;
+      const n=data.length;
+      const pts=data.map((d,i)=>{
+        const angle=(2*Math.PI*i/n)-Math.PI/2;
+        const val=Math.max(0,Math.min(100,d.value))/100;
+        return{x:cx+r*val*Math.cos(angle),y:cy+r*val*Math.sin(angle),lx:cx+(r+18)*Math.cos(angle),ly:cy+(r+18)*Math.sin(angle),label:d.label,value:d.value};
+      });
+      const poly=pts.map(p=>`${p.x},${p.y}`).join(" ");
+      const rings=[0.25,0.5,0.75,1];
+      return(
+        <svg width={size} height={size} style={{overflow:"visible"}}>
+          {rings.map((rv,ri)=>{
+            const rpts=Array.from({length:n},(_,i)=>{const a=(2*Math.PI*i/n)-Math.PI/2;return`${cx+r*rv*Math.cos(a)},${cy+r*rv*Math.sin(a)}`;});
+            return <polygon key={ri} points={rpts.join(" ")} fill="none" stroke="var(--border)" strokeWidth="1" opacity={0.7}/>;
+          })}
+          {pts.map((p,i)=><line key={i} x1={cx} y1={cy} x2={cx+r*Math.cos((2*Math.PI*i/n)-Math.PI/2)} y2={cy+r*Math.sin((2*Math.PI*i/n)-Math.PI/2)} stroke="var(--border)" strokeWidth="1"/>)}
+          <polygon points={poly} fill="var(--accent)" fillOpacity="0.18" stroke="var(--accent)" strokeWidth="2" strokeLinejoin="round"/>
+          {pts.map((p,i)=><circle key={i} cx={p.x} cy={p.y} r="4" fill="var(--accent)" stroke="var(--card)" strokeWidth="2"/>)}
+          {pts.map((p,i)=>{
+            const anchor=p.lx<cx-5?"end":p.lx>cx+5?"start":"middle";
+            return(<g key={i}>
+              <text x={p.lx} y={p.ly-3} textAnchor={anchor} fontSize="9" fill="var(--text3)" fontWeight="700" fontFamily="DM Sans,sans-serif">{p.label}</text>
+              <text x={p.lx} y={p.ly+9} textAnchor={anchor} fontSize="9" fill="var(--accent)" fontWeight="900" fontFamily="DM Sans,sans-serif">{p.value}%</text>
+            </g>);
+          })}
+        </svg>
+      );
+    }
+
+    // ── ANALYTICS: HEATMAP (35 days) ──────────────────────────────
+    function ActivityHeatmap({history}){
+      const today=new Date();
+      const cells=Array.from({length:35},(_,i)=>{
+        const d=new Date(today);d.setDate(d.getDate()-(34-i));
+        const dateStr=d.toDateString();
+        const dayH=history.filter(a=>new Date(a.date).toDateString()===dateStr);
+        return{date:d,count:dayH.length,avg:dayH.length?Math.round(dayH.reduce((s,a)=>s+a.score,0)/dayH.length):0,isToday:dateStr===today.toDateString()};
+      });
+      const maxC=Math.max(...cells.map(c=>c.count),1);
+      function getColor(c){
+        if(c.count===0) return"var(--border)";
+        const intensity=c.count/maxC;
+        if(intensity>0.75) return"var(--accent)";
+        if(intensity>0.4) return"var(--accent2)";
+        return"var(--accent-mid)";
+      }
+      return(
+        <div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(35,1fr)",gap:3}}>
+            {cells.map((c,i)=>(
+              <div key={i} title={`${c.date.toLocaleDateString("ru-RU")}: ${c.count} тест(ов)${c.count>0?`, ср. ${c.avg}%`:""}`}
+                style={{aspectRatio:"1",borderRadius:3,background:getColor(c),border:c.isToday?"2px solid var(--accent)":"none",cursor:c.count>0?"pointer":"default",transition:"transform .15s"}}
+                onMouseEnter={e=>{if(c.count>0)e.currentTarget.style.transform="scale(1.4)";}}
+                onMouseLeave={e=>{e.currentTarget.style.transform="scale(1)";}}
+              />
+            ))}
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginTop:8,justifyContent:"flex-end"}}>
+            <span style={{fontSize:10,color:"var(--text3)"}}>Меньше</span>
+            {["var(--border)","var(--accent-mid)","var(--accent2)","var(--accent)"].map((bg,i)=><div key={i} style={{width:10,height:10,borderRadius:2,background:bg}}/>)}
+            <span style={{fontSize:10,color:"var(--text3)"}}>Больше</span>
+          </div>
+        </div>
+      );
+    }
+
+    // ── ANALYTICS: SCORE TREND ────────────────────────────────────
+    function ScoreTrendChart({history}){
+      const recent=[...history].sort((a,b)=>new Date(a.date)-new Date(b.date)).slice(-15);
+      if(recent.length<2) return <div style={{textAlign:"center",padding:"24px 0",color:"var(--text3)",fontSize:13}}>Недостаточно данных (нужно минимум 2 попытки)</div>;
+      const W=360,H=100,padL=28,padR=8,padT=12,padB=24;
+      const minS=Math.min(...recent.map(r=>r.score));
+      const maxS=Math.max(...recent.map(r=>r.score));
+      const rangeS=Math.max(maxS-minS,20);
+      function xp(i){return padL+(i/(recent.length-1))*(W-padL-padR);}
+      function yp(s){return padT+((maxS-s)/rangeS)*(H-padT-padB);}
+      const linePts=recent.map((r,i)=>`${xp(i)},${yp(r.score)}`).join(" ");
+      const areaClose=`${xp(recent.length-1)},${H-padB} ${xp(0)},${H-padB}`;
+      function movAvg(arr,w=3){return arr.map((_,i)=>{const sl=arr.slice(Math.max(0,i-w+1),i+1);return Math.round(sl.reduce((s,v)=>s+v,0)/sl.length);});}
+      const ma=movAvg(recent.map(r=>r.score));
+      const maLine=recent.map((r,i)=>`${xp(i)},${yp(ma[i])}`).join(" ");
+      return(
+        <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{overflow:"visible"}}>
+          <defs><linearGradient id="trendGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--accent)" stopOpacity="0.3"/><stop offset="100%" stopColor="var(--accent)" stopOpacity="0.02"/></linearGradient></defs>
+          {minS<=60&&maxS>=60&&<line x1={padL} y1={yp(60)} x2={W-padR} y2={yp(60)} stroke="var(--red)" strokeWidth="1" strokeDasharray="4,3" opacity="0.5"/>}
+          {minS<=60&&maxS>=60&&<text x={padL+2} y={yp(60)-3} fontSize="8" fill="var(--red)" opacity="0.7">60%</text>}
+          <polygon points={`${linePts} ${areaClose}`} fill="url(#trendGrad)"/>
+          <polyline points={linePts} fill="none" stroke="var(--accent)" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
+          <polyline points={maLine} fill="none" stroke="var(--blue)" strokeWidth="1.5" strokeDasharray="5,3" strokeLinejoin="round" opacity="0.7"/>
+          {recent.map((r,i)=>(
+            <g key={i}><circle cx={xp(i)} cy={yp(r.score)} r="4" fill={r.passed?"var(--green)":"var(--red)"} stroke="var(--card)" strokeWidth="2"/><title>{new Date(r.date).toLocaleDateString("ru-RU")}: {r.score}%</title></g>
+          ))}
+          {[minS,Math.round((minS+maxS)/2),maxS].map((v,i)=>(
+            <text key={i} x={padL-3} y={yp(v)+3} textAnchor="end" fontSize="8.5" fill="var(--text3)" fontFamily="DM Sans,sans-serif">{v}%</text>
+          ))}
+          {recent.map((r,i)=>(
+            (i===0||i===recent.length-1||i===Math.floor(recent.length/2))&&
+            <text key={i} x={xp(i)} y={H-padB+12} textAnchor="middle" fontSize="8" fill="var(--text3)" fontFamily="DM Sans,sans-serif">{new Date(r.date).toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit"})}</text>
+          ))}
+          <g><circle cx={W-80} cy={H-14} r="3" fill="var(--accent)"/><text x={W-74} y={H-11} fontSize="8" fill="var(--text3)">Результат</text></g>
+          <line x1={W-44} y1={H-14} x2={W-30} y2={H-14} stroke="var(--blue)" strokeWidth="1.5" strokeDasharray="4,2"/><text x={W-26} y={H-11} fontSize="8" fill="var(--text3)">Тренд</text>
+        </svg>
+      );
+    }
+
+    // ── ANALYTICS: TIME DISTRIBUTION ─────────────────────────────
+    function TimeDistribution({history}){
+      if(history.length===0) return null;
+      const buckets=[{label:"< 5 мин",min:0,max:300},{label:"5–10 мин",min:300,max:600},{label:"10–20 мин",min:600,max:1200},{label:"> 20 мин",min:1200,max:Infinity}];
+      const counts=buckets.map(b=>history.filter(a=>{const ts=a.timeSpent||0;return ts>=b.min&&ts<b.max;}).length);
+      const maxC=Math.max(...counts,1);
+      const avgTime=Math.round(history.reduce((s,a)=>s+(a.timeSpent||0),0)/history.length);
+      return(
+        <div>
+          <div style={{display:"flex",gap:8,alignItems:"flex-end",height:80,marginBottom:10}}>
+            {buckets.map((b,i)=>(
+              <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+                <div style={{fontSize:10,color:"var(--text3)",fontWeight:700}}>{counts[i]}</div>
+                <div style={{width:"100%",height:`${Math.max(8,counts[i]/maxC*68)}px`,background:"linear-gradient(180deg,var(--blue),#1a3a6a)",borderRadius:"4px 4px 2px 2px",opacity:counts[i]===0?0.2:1}}/>
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            {buckets.map((b,i)=><div key={i} style={{flex:1,fontSize:9.5,color:"var(--text3)",textAlign:"center",fontWeight:600}}>{b.label}</div>)}
+          </div>
+          <div style={{marginTop:10,padding:"8px 12px",background:"var(--bg2)",borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontSize:11.5,color:"var(--text3)"}}>⏱ Среднее время</span>
+            <span style={{fontSize:13,fontWeight:800,color:"var(--blue)"}}>{Math.floor(avgTime/60)}:{String(avgTime%60).padStart(2,"0")}</span>
+          </div>
+        </div>
+      );
+    }
+
+    // ── ANALYTICS: WEAK TOPICS ────────────────────────────────────
+    function WeakTopicsBlock({history,quizzes}){
+      const cats=[...new Set(quizzes.map(q=>q.category))];
+      const catStats=cats.map(cat=>{
+        const catA=history.filter(a=>{const q=quizzes.find(q=>q.id===a.quizId);return q&&q.category===cat;});
+        if(!catA.length) return null;
+        const avg=Math.round(catA.reduce((s,a)=>s+a.score,0)/catA.length);
+        const passR=Math.round(catA.filter(a=>a.passed).length/catA.length*100);
+        const trend=catA.length>=2?catA[catA.length-1].score-catA[0].score:0;
+        return{cat,avg,passR,attempts:catA.length,trend};
+      }).filter(Boolean);
+      const weak=catStats.filter(c=>c.avg<70).sort((a,b)=>a.avg-b.avg).slice(0,5);
+      if(weak.length===0) return(<div style={{textAlign:"center",padding:"20px 0",color:"var(--green)",fontSize:13,fontWeight:600}}>✅ Нет явных слабых мест! Все категории выше 70%</div>);
+      return(
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {weak.map(({cat,avg,passR,attempts,trend})=>(
+            <div key={cat} style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:10,padding:"11px 14px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:7}}>
+                <div><span style={{fontWeight:700,color:"var(--text)",fontSize:13}}>{cat}</span><span style={{marginLeft:8,fontSize:10.5,color:"var(--text3)"}}>{attempts} попыток</span></div>
+                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                  {trend!==0&&<span style={{fontSize:11,fontWeight:700,color:trend>0?"var(--green)":"var(--red)"}}>{trend>0?`↑+${trend}%`:`↓${trend}%`}</span>}
+                  <span style={{fontFamily:"'Playfair Display',serif",fontSize:16,fontWeight:900,color:avg<50?"var(--red)":"var(--accent)"}}>{avg}%</span>
+                </div>
+              </div>
+              <div style={{background:"var(--border)",borderRadius:99,height:5,marginBottom:5}}><div style={{width:`${avg}%`,height:"100%",background:avg<50?"var(--red)":"linear-gradient(90deg,var(--accent),var(--accent2))",borderRadius:99}}/></div>
+              <div style={{display:"flex",justifyContent:"space-between"}}>
+                <span style={{fontSize:10.5,color:"var(--text3)"}}>Сдача: <span style={{fontWeight:700,color:passR>=60?"var(--accent)":"var(--red)"}}>{passR}%</span></span>
+                <span style={{fontSize:10.5,color:"var(--red)",fontWeight:600}}>{avg<50?"🔴 Требует внимания":avg<60?"🟠 Слабо":"🟡 Ниже нормы"}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ── ANALYTICS: INSIGHTS ───────────────────────────────────────
+    function PerformanceInsights({history,quizzes}){
+      const insights=[];
+      if(!history.length) return null;
+      const avgScore=Math.round(history.reduce((s,a)=>s+a.score,0)/history.length);
+      const passRate=Math.round(history.filter(a=>a.passed).length/history.length*100);
+      const last5=history.slice(-5);
+      const last5avg=last5.length?Math.round(last5.reduce((s,a)=>s+a.score,0)/last5.length):0;
+      const prevAvg=history.length>5?Math.round(history.slice(-10,-5).reduce((s,a)=>s+a.score,0)/Math.min(5,history.length-5)):null;
+      if(last5avg>avgScore+5) insights.push({icon:"🚀",color:"var(--green)",title:"Прогресс ускоряется",text:`Последние 5 попыток в среднем ${last5avg}% — выше общего на ${last5avg-avgScore}%`});
+      else if(prevAvg!==null&&last5avg<prevAvg-5) insights.push({icon:"⚠️",color:"var(--accent)",title:"Снижение результатов",text:`Последние попытки ниже предыдущих на ${prevAvg-last5avg}%. Рекомендуем повторение.`});
+      if(passRate>=80) insights.push({icon:"🏆",color:"var(--green)",title:"Высокий процент сдачи",text:`Вы сдаёте ${passRate}% тестов — отличный результат!`});
+      else if(passRate<50) insights.push({icon:"📚",color:"var(--red)",title:"Низкий процент сдачи",text:`Только ${passRate}% тестов сдано. Сосредоточьтесь на слабых темах.`});
+      const hardAttempts=history.filter(a=>{const q=quizzes.find(q=>q.id===a.quizId);return q&&q.difficulty==="HARD";});
+      if(hardAttempts.length>=3){const ha=Math.round(hardAttempts.reduce((s,a)=>s+a.score,0)/hardAttempts.length);if(ha>=70) insights.push({icon:"💪",color:"var(--blue)",title:"Сильный студент",text:`Средний балл на сложных тестах: ${ha}%`});}
+      const times=history.map(a=>a.timeSpent||0).filter(t=>t>0);
+      const avgT=times.length?Math.round(times.reduce((s,v)=>s+v,0)/times.length):0;
+      if(avgT>0&&avgT<300) insights.push({icon:"⚡",color:"var(--accent)",title:"Быстрые ответы",text:`Среднее время сессии: ${Math.floor(avgT/60)} мин — не торопитесь с ответами?`});
+      if(!insights.length) return <div style={{color:"var(--text3)",fontSize:13,textAlign:"center",padding:"16px 0"}}>Пройдите больше тестов для получения инсайтов</div>;
+      return(
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {insights.map((ins,i)=>(
+            <div key={i} style={{display:"flex",gap:11,padding:"11px 14px",background:"var(--bg2)",border:`1px solid ${ins.color}33`,borderRadius:10,borderLeft:`3px solid ${ins.color}`}}>
+              <span style={{fontSize:18,flexShrink:0,marginTop:1}}>{ins.icon}</span>
+              <div><div style={{fontWeight:700,fontSize:12.5,color:ins.color,marginBottom:3}}>{ins.title}</div><div style={{fontSize:12,color:"var(--text2)",lineHeight:1.5}}>{ins.text}</div></div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // ANALYTICS PAGE (TABBED)
+    // ═══════════════════════════════════════════════════════════════
     function AnalyticsPage({user,quizzes}){
+      const[activeTab,setActiveTab]=useState("overview");
       const history=getHistory();
-      const cats=["Python","JavaScript","Java","C++","HTML/CSS","TypeScript","Алгоритмы","Базы данных","DevOps","Frontend","Сети"];
-      const byC=cats.map(c=>({c,n:quizzes.filter(q=>q.category===c).length})).filter(x=>x.n>0);
-      const maxN=Math.max(...byC.map(x=>x.n),1);
-      const byD={EASY:0,MEDIUM:0,HARD:0,EXPERT:0};
-      quizzes.forEach(q=>{if(byD[q.difficulty]!==undefined) byD[q.difficulty]++;});
       const today=new Date();
       const days=Array.from({length:7},(_,i)=>{const d=new Date(today);d.setDate(d.getDate()-(6-i));return d;});
       const dayLabels=["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
       const activityByDay=days.map(d=>{const dateStr=d.toDateString();const dayH=history.filter(a=>new Date(a.date).toDateString()===dateStr);return{day:dayLabels[d.getDay()===0?6:d.getDay()-1],count:dayH.length,avg:dayH.length?Math.round(dayH.reduce((s,a)=>s+a.score,0)/dayH.length):0};});
       const maxAct=Math.max(...activityByDay.map(x=>x.count),1);
-      const catProgress=cats.map(cat=>{const catA=history.filter(a=>{const q=quizzes.find(q=>q.id===a.quizId);return q&&q.category===cat;});return{cat,attempts:catA.length,avg:catA.length?Math.round(catA.reduce((s,a)=>s+a.score,0)/catA.length):0,best:catA.length?Math.max(...catA.map(a=>a.score)):0};}).filter(x=>x.attempts>0).sort((a,b)=>b.avg-a.avg);
+      const cats=[...new Set(quizzes.map(q=>q.category))];
+      const catProgress=cats.map(cat=>{const catA=history.filter(a=>{const q=quizzes.find(q=>q.id===a.quizId);return q&&q.category===cat;});return{cat,attempts:catA.length,avg:catA.length?Math.round(catA.reduce((s,a)=>s+a.score,0)/catA.length):0,best:catA.length?Math.max(...catA.map(a=>a.score)):0,passed:catA.filter(a=>a.passed).length};}).filter(x=>x.attempts>0).sort((a,b)=>b.avg-a.avg);
       let streak=0;
       const sortedDates=[...new Set(history.map(a=>new Date(a.date).toDateString()))].sort((a,b)=>new Date(b)-new Date(a));
       if(sortedDates.length>0){const todayStr=today.toDateString();const yestStr=new Date(today.getTime()-86400000).toDateString();if(sortedDates[0]===todayStr||sortedDates[0]===yestStr){streak=1;let prev=new Date(sortedDates[0]);for(let i=1;i<sortedDates.length;i++){const curr=new Date(sortedDates[i]);if((prev-curr)/86400000<=1){streak++;prev=curr;}else break;}}}
       const unlocked=getUnlocked(history,quizzes);
       const avgScore=history.length?Math.round(history.reduce((s,a)=>s+a.score,0)/history.length):0;
       const passRate=history.length?Math.round(history.filter(a=>a.passed).length/history.length*100):0;
+      const totalTime=history.reduce((s,a)=>s+(a.timeSpent||0),0);
+      const bestScore=history.length?Math.max(...history.map(a=>a.score)):0;
+      const radarData=catProgress.slice(0,6).map(c=>({label:c.cat.slice(0,8),value:c.avg}));
+      const TABS=[{id:"overview",label:"Обзор",icon:"📊"},{id:"progress",label:"Прогресс",icon:"📈"},{id:"categories",label:"Категории",icon:"🗂️"},{id:"insights",label:"Инсайты",icon:"💡"},{id:"achievements",label:"Достижения",icon:"🏅"}];
       return(
-        <div style={{maxWidth:900,margin:"0 auto",padding:22}}>
-          <h1 style={{fontFamily:"'Playfair Display',serif",fontSize:23,fontWeight:900,color:"var(--text)",marginBottom:6}}>📈 Аналитика</h1>
-          <p style={{color:"var(--text3)",fontSize:13,marginBottom:20}}>Ваш прогресс и статистика платформы</p>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:11,marginBottom:14}}>
-            {[["📚","Тестов пройдено",history.length,"var(--accent)"],["📊","Средний балл",`${avgScore}%`,"var(--blue)"],["🔥","Серия дней",streak,"var(--red)"],["🏅","Достижений",`${unlocked.length}/${ACHIEVEMENTS.length}`,"var(--green)"]].map(([ic,l,v,col])=>(
-              <Cd key={l} style={{padding:"16px 12px",textAlign:"center"}}><div style={{fontSize:22,marginBottom:5}}>{ic}</div><div style={{fontFamily:"'Playfair Display',serif",fontSize:22,fontWeight:900,color:col}}>{v}</div><div style={{fontSize:11,color:"var(--text3)",marginTop:3}}>{l}</div></Cd>
+        <div style={{maxWidth:980,margin:"0 auto",padding:22}}>
+          <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:20,flexWrap:"wrap",gap:10}}>
+            <div>
+              <h1 style={{fontFamily:"'Playfair Display',serif",fontSize:23,fontWeight:900,color:"var(--text)",marginBottom:4}}>📈 Аналитика</h1>
+              <p style={{color:"var(--text3)",fontSize:13}}>Детальный анализ вашего прогресса · {history.length} попыток</p>
+            </div>
+            {history.length>0&&<div style={{display:"flex",gap:6,alignItems:"center",background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:10,padding:"6px 10px"}}>
+              <div style={{width:8,height:8,borderRadius:"50%",background:avgScore>=75?"var(--green)":avgScore>=60?"var(--accent)":"var(--red)"}}/>
+              <span style={{fontSize:12,color:"var(--text2)",fontWeight:600}}>Уровень: <span style={{fontWeight:800,color:avgScore>=75?"var(--green)":avgScore>=60?"var(--accent)":"var(--red)"}}>{avgScore>=75?"Продвинутый":avgScore>=60?"Средний":"Начинающий"}</span></span>
+            </div>}
+          </div>
+          <div style={{display:"flex",gap:4,background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:12,padding:4,marginBottom:20,flexWrap:"wrap"}}>
+            {TABS.map(tab=>(
+              <button key={tab.id} onClick={()=>setActiveTab(tab.id)} style={{flex:1,minWidth:80,padding:"7px 10px",borderRadius:9,border:"none",background:activeTab===tab.id?"var(--card)":"transparent",color:activeTab===tab.id?"var(--accent)":"var(--text3)",fontWeight:activeTab===tab.id?700:500,fontSize:12.5,cursor:"pointer",transition:"all .18s",boxShadow:activeTab===tab.id?"var(--shadow)":"none",display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
+                <span>{tab.icon}</span><span>{tab.label}</span>
+              </button>
             ))}
           </div>
-          <Cd style={{padding:20,marginBottom:12}}>
-            <div style={{fontWeight:700,fontSize:13.5,marginBottom:16,color:"var(--text)",display:"flex",justifyContent:"space-between"}}>📅 Активность (7 дней)<span style={{fontSize:12,color:"var(--text3)",fontWeight:500}}>{history.length} всего</span></div>
-            <div style={{display:"flex",gap:8,alignItems:"flex-end",height:120}}>
-              {activityByDay.map((d,i)=>(
-                <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-                  <div style={{fontSize:10.5,color:"var(--text3)",fontWeight:700}}>{d.count>0?`${d.avg}%`:""}</div>
-                  <div style={{width:"100%",display:"flex",alignItems:"flex-end",height:76}}>
-                    <div style={{width:"100%",height:`${d.count===0?6:Math.max(12,d.count/maxAct*76)}px`,background:d.count===0?"var(--border)":"linear-gradient(180deg,var(--accent2),var(--accent))",borderRadius:"5px 5px 3px 3px",transition:"height .8s ease",position:"relative"}}>
-                      {d.count>0&&<div style={{position:"absolute",top:-18,left:"50%",transform:"translateX(-50%)",fontSize:10,color:"var(--accent)",fontWeight:800}}>{d.count}</div>}
-                    </div>
-                  </div>
-                  <div style={{fontSize:11.5,color:"var(--text2)",fontWeight:600}}>{d.day}</div>
-                </div>
-              ))}
-            </div>
-          </Cd>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
-            <Cd style={{padding:18}}>
-              <div style={{fontWeight:700,fontSize:13,marginBottom:14,color:"var(--text)"}}>🎯 Распределение оценок</div>
-              {[["A (90–100%)",history.filter(a=>a.score>=90).length,"var(--green)"],["B (75–89%)",history.filter(a=>a.score>=75&&a.score<90).length,"var(--blue)"],["C (60–74%)",history.filter(a=>a.score>=60&&a.score<75).length,"var(--accent)"],["F (<60%)",history.filter(a=>a.score<60).length,"var(--red)"]].map(([label,count,col])=>(
-                <div key={label} style={{marginBottom:9}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:12,color:"var(--text2)",fontWeight:600}}>{label}</span><span style={{fontSize:12,color:col,fontWeight:800}}>{count}</span></div><div style={{background:"var(--border)",borderRadius:99,height:6}}><div style={{width:`${history.length?count/history.length*100:0}%`,height:"100%",background:col,borderRadius:99,transition:"width 1s ease"}}/></div></div>
-              ))}
-              <div style={{marginTop:12,padding:"9px 12px",background:"var(--bg2)",borderRadius:9,display:"flex",justifyContent:"space-between"}}><span style={{fontSize:12,color:"var(--text3)"}}>Процент сдачи</span><span style={{fontSize:13,fontWeight:800,color:passRate>=70?"var(--green)":passRate>=50?"var(--accent)":"var(--red)"}}>{passRate}%</span></div>
-            </Cd>
-            <Cd style={{padding:18}}>
-              <div style={{fontWeight:700,fontSize:13,marginBottom:14,color:"var(--text)"}}>📊 По сложности</div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
-                {Object.entries(DIFF).map(([k,v])=>(
-                  <div key={k} style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:10,padding:"11px 8px",textAlign:"center"}}><div style={{fontSize:16,marginBottom:3}}>{v.dot}</div><div style={{fontFamily:"'Playfair Display',serif",fontSize:18,fontWeight:900,color:v.color}}>{byD[k]}</div><div style={{fontSize:10.5,color:"var(--text3)",marginTop:2}}>{v.label}</div></div>
+
+          {activeTab==="overview"&&(
+            <div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:11,marginBottom:14}}>
+                {[["📚","Тестов пройдено",history.length,"var(--accent)",null],["📊","Средний балл",`${avgScore}%`,"var(--blue)",history.length?`Лучший: ${bestScore}%`:null],["🔥","Серия дней",streak,"var(--red)",streak>0?"дней подряд":null],["⏱","Общее время",`${Math.floor(totalTime/3600)}ч ${Math.floor((totalTime%3600)/60)}м`,"var(--green)",`${Math.floor(totalTime/60)} мин`]].map(([ic,l,v,col,sub])=>(
+                  <Cd key={l} style={{padding:"16px 12px",textAlign:"center"}}><div style={{fontSize:22,marginBottom:5}}>{ic}</div><div style={{fontFamily:"'Playfair Display',serif",fontSize:21,fontWeight:900,color:col}}>{v}</div><div style={{fontSize:11,color:"var(--text3)",marginTop:3}}>{l}</div>{sub&&<div style={{fontSize:10.5,color:col,marginTop:4,fontWeight:600,opacity:.75}}>{sub}</div>}</Cd>
                 ))}
               </div>
-              <div style={{fontWeight:700,fontSize:12,marginBottom:8,color:"var(--text3)",textTransform:"uppercase",letterSpacing:.8}}>По категориям</div>
-              {byC.slice(0,5).map(({c,n})=>(
-                <div key={c} style={{display:"flex",alignItems:"center",gap:9,marginBottom:6}}>
-                  <div style={{width:70,fontSize:11.5,color:"var(--text2)",fontWeight:600,textAlign:"right",flexShrink:0}}>{c}</div>
-                  <div style={{flex:1,background:"var(--border)",borderRadius:99,height:6}}><div style={{width:`${n/maxN*100}%`,height:"100%",background:"linear-gradient(90deg,var(--accent),var(--accent2))",borderRadius:99}}/></div>
-                  <div style={{width:14,fontSize:11.5,fontWeight:700,color:"var(--accent)"}}>{n}</div>
-                </div>
-              ))}
-            </Cd>
-          </div>
-          {catProgress.length>0&&(
-            <Cd style={{padding:18,marginBottom:12}}>
-              <div style={{fontWeight:700,fontSize:13.5,marginBottom:14,color:"var(--text)"}}>🧠 Прогресс по категориям</div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:10}}>
-                {catProgress.map(({cat,attempts,avg,best})=>(
-                  <div key={cat} style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:10,padding:"12px 14px"}}>
-                    <div style={{fontWeight:700,color:"var(--text)",fontSize:13,marginBottom:3}}>{cat}</div>
-                    <div style={{fontSize:11,color:"var(--text3)",marginBottom:8}}>{attempts} попыток</div>
-                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}><span style={{fontSize:11,color:"var(--text3)"}}>Средний</span><span style={{fontSize:12,fontWeight:800,color:avg>=75?"var(--green)":avg>=60?"var(--accent)":"var(--red)"}}>{avg}%</span></div>
-                    <div style={{background:"var(--border)",borderRadius:99,height:5,marginBottom:6}}><div style={{width:`${avg}%`,height:"100%",background:avg>=75?"var(--green)":avg>=60?"var(--accent)":"var(--red)",borderRadius:99}}/></div>
-                    <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:11,color:"var(--text3)"}}>Лучший</span><span style={{fontSize:12,fontWeight:800,color:"var(--green)"}}>{best}%</span></div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+                <Cd style={{padding:18}}>
+                  <div style={{fontWeight:700,fontSize:13,marginBottom:14,color:"var(--text)"}}>🎯 Распределение оценок</div>
+                  {[["A (90–100%)",history.filter(a=>a.score>=90).length,"var(--green)"],["B (75–89%)",history.filter(a=>a.score>=75&&a.score<90).length,"var(--blue)"],["C (60–74%)",history.filter(a=>a.score>=60&&a.score<75).length,"var(--accent)"],["F (<60%)",history.filter(a=>a.score<60).length,"var(--red)"]].map(([label,count,col])=>(
+                    <div key={label} style={{marginBottom:9}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:12,color:"var(--text2)",fontWeight:600}}>{label}</span><span style={{fontSize:12,color:col,fontWeight:800}}>{count} <span style={{fontSize:10,color:"var(--text3)",fontWeight:500}}>({history.length?Math.round(count/history.length*100):0}%)</span></span></div><div style={{background:"var(--border)",borderRadius:99,height:7}}><div style={{width:`${history.length?count/history.length*100:0}%`,height:"100%",background:col,borderRadius:99,transition:"width 1.2s ease"}}/></div></div>
+                  ))}
+                  <div style={{marginTop:12,padding:"10px 12px",background:"var(--bg2)",borderRadius:9,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <span style={{fontSize:12,color:"var(--text3)"}}>✅ Процент сдачи</span>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <div style={{width:48,height:48}}>
+                        <svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9" fill="none" stroke="var(--border)" strokeWidth="3.8"/><circle cx="18" cy="18" r="15.9" fill="none" stroke={passRate>=70?"var(--green)":passRate>=50?"var(--accent)":"var(--red)"} strokeWidth="3.8" strokeDasharray={`${passRate} ${100-passRate}`} strokeDashoffset="25" strokeLinecap="round" style={{transition:"stroke-dasharray 1.5s ease"}}/><text x="18" y="22.5" textAnchor="middle" fontSize="9" fontWeight="900" fill={passRate>=70?"var(--green)":passRate>=50?"var(--accent)":"var(--red)"} fontFamily="DM Sans,sans-serif">{passRate}%</text></svg>
+                      </div>
+                    </div>
                   </div>
-                ))}
+                </Cd>
+                <Cd style={{padding:18}}>
+                  <div style={{fontWeight:700,fontSize:13,marginBottom:10,color:"var(--text)"}}>🕸 Профиль категорий</div>
+                  {radarData.length>=3?<div style={{display:"flex",justifyContent:"center"}}><RadarChart data={radarData} size={190}/></div>:<div style={{textAlign:"center",padding:"30px 0",color:"var(--text3)",fontSize:13}}>Пройдите тесты в 3+ категориях</div>}
+                </Cd>
+              </div>
+              <Cd style={{padding:20,marginBottom:12}}>
+                <div style={{fontWeight:700,fontSize:13.5,marginBottom:4,color:"var(--text)",display:"flex",justifyContent:"space-between"}}>📅 Активность (7 дней)<span style={{fontSize:12,color:"var(--text3)",fontWeight:500}}>{history.length} попыток всего</span></div>
+                <div style={{fontSize:11.5,color:"var(--text3)",marginBottom:14}}>Высота бара = кол-во тестов, цифра = средний балл</div>
+                <div style={{display:"flex",gap:8,alignItems:"flex-end",height:110}}>
+                  {activityByDay.map((d,i)=>(
+                    <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:5}}>
+                      <div style={{fontSize:10.5,color:"var(--text3)",fontWeight:700,height:14}}>{d.count>0?`${d.avg}%`:""}</div>
+                      <div style={{width:"100%",display:"flex",alignItems:"flex-end",height:80}}>
+                        <div title={`${d.day}: ${d.count}`} style={{width:"100%",height:`${d.count===0?6:Math.max(14,d.count/maxAct*80)}px`,background:d.count===0?"var(--border)":"linear-gradient(180deg,var(--accent2),var(--accent))",borderRadius:"5px 5px 3px 3px",transition:"height .9s ease"}}/>
+                      </div>
+                      <div style={{fontSize:11.5,color:"var(--text2)",fontWeight:600}}>{d.day}</div>
+                      {d.count>0&&<div style={{fontSize:10,color:"var(--accent)",fontWeight:800}}>{d.count}</div>}
+                    </div>
+                  ))}
+                </div>
+              </Cd>
+              <Cd style={{padding:18,marginBottom:12}}>
+                <div style={{fontWeight:700,fontSize:13.5,marginBottom:12,color:"var(--text)"}}>🗓 Тепловая карта (35 дней)</div>
+                <ActivityHeatmap history={history}/>
+              </Cd>
+            </div>
+          )}
+
+          {activeTab==="progress"&&(
+            <div>
+              <Cd style={{padding:20,marginBottom:12}}>
+                <div style={{fontWeight:700,fontSize:13.5,marginBottom:4,color:"var(--text)"}}>📉 Динамика результатов</div>
+                <div style={{fontSize:11.5,color:"var(--text3)",marginBottom:14}}>Синяя пунктирная линия — тренд. Зелёные точки — сдано, красные — не сдано.</div>
+                <ScoreTrendChart history={history}/>
+              </Cd>
+              <Cd style={{padding:18,marginBottom:12}}>
+                <div style={{fontWeight:700,fontSize:13.5,marginBottom:14,color:"var(--text)"}}>⏱ Распределение времени</div>
+                <TimeDistribution history={history}/>
+              </Cd>
+              <Cd style={{padding:18}}>
+                <div style={{fontWeight:700,fontSize:13,marginBottom:14,color:"var(--text)"}}>📊 Статистика по сложности</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  {Object.entries(DIFF).map(([k,v])=>{
+                    const diffAttempts=history.filter(a=>{const q=quizzes.find(q=>q.id===a.quizId);return q&&q.difficulty===k;});
+                    const diffAvg=diffAttempts.length?Math.round(diffAttempts.reduce((s,a)=>s+a.score,0)/diffAttempts.length):0;
+                    const diffPass=diffAttempts.length?Math.round(diffAttempts.filter(a=>a.passed).length/diffAttempts.length*100):0;
+                    return(
+                      <div key={k} style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:10,padding:"13px 12px"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8}}><span style={{fontSize:16}}>{v.dot}</span><span style={{fontWeight:700,color:v.color,fontSize:13}}>{v.label}</span><span style={{marginLeft:"auto",fontSize:11,color:"var(--text3)"}}>{diffAttempts.length} попыток</span></div>
+                        {diffAttempts.length>0?(<><div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"var(--text3)",marginBottom:4}}><span>Ср. балл</span><span style={{fontWeight:800,color:v.color}}>{diffAvg}%</span></div><div style={{background:"var(--border)",borderRadius:99,height:5,marginBottom:6}}><div style={{width:`${diffAvg}%`,height:"100%",background:v.color,borderRadius:99}}/></div><div style={{fontSize:11,color:"var(--text3)"}}>Сдача: <span style={{fontWeight:700,color:diffPass>=60?"var(--green)":"var(--red)"}}>{diffPass}%</span></div></>):<div style={{fontSize:11,color:"var(--text3)"}}>Нет данных</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </Cd>
+            </div>
+          )}
+
+          {activeTab==="categories"&&(
+            <div>
+              {catProgress.length===0
+                ?<Cd style={{padding:40,textAlign:"center"}}><div style={{fontSize:40,marginBottom:12}}>📂</div><div style={{color:"var(--text3)",fontSize:15}}>Нет данных. Пройдите хотя бы один тест.</div></Cd>
+                :<>
+                  <Cd style={{padding:18,marginBottom:12}}>
+                    <div style={{fontWeight:700,fontSize:13.5,marginBottom:14,color:"var(--text)"}}>🧠 Прогресс по категориям</div>
+                    <div style={{display:"flex",flexDirection:"column",gap:9}}>
+                      {catProgress.map(({cat,attempts,avg,best,passed})=>(
+                        <div key={cat} style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:11,padding:"12px 16px"}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+                            <div><span style={{fontWeight:700,color:"var(--text)",fontSize:13.5}}>{cat}</span><span style={{marginLeft:9,fontSize:11,color:"var(--text3)"}}>{attempts} попыток · {passed} сдано</span></div>
+                            <div style={{textAlign:"right"}}><div style={{fontFamily:"'Playfair Display',serif",fontSize:18,fontWeight:900,color:avg>=75?"var(--green)":avg>=60?"var(--accent)":"var(--red)"}}>{avg}%</div><div style={{fontSize:10.5,color:"var(--text3)"}}>лучший: <span style={{fontWeight:700,color:"var(--green)"}}>{best}%</span></div></div>
+                          </div>
+                          <div style={{background:"var(--border)",borderRadius:99,height:7,marginBottom:4}}><div style={{width:`${avg}%`,height:"100%",background:avg>=75?"var(--green)":avg>=60?"linear-gradient(90deg,var(--accent),var(--accent2))":"var(--red)",borderRadius:99,transition:"width 1s ease"}}/></div>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <div style={{fontSize:10.5,color:"var(--text3)"}}>Сдача: <span style={{fontWeight:700,color:attempts?Math.round(passed/attempts*100)>=60?"var(--green)":"var(--red)":"var(--text3)"}}>{attempts?Math.round(passed/attempts*100):0}%</span></div>
+                            <span style={{fontSize:10.5,fontWeight:700,padding:"2px 8px",borderRadius:99,background:avg>=75?"var(--green-bg)":avg>=60?"var(--accent-bg)":"var(--red-bg)",color:avg>=75?"var(--green)":avg>=60?"var(--accent)":"var(--red)"}}>{avg>=75?"✓ Хорошо":avg>=60?"~ Норма":"✗ Слабо"}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </Cd>
+                  <Cd style={{padding:18}}>
+                    <div style={{fontWeight:700,fontSize:13.5,marginBottom:14,color:"var(--text)"}}>⚠️ Слабые темы (требуют повторения)</div>
+                    <WeakTopicsBlock history={history} quizzes={quizzes}/>
+                  </Cd>
+                </>
+              }
+            </div>
+          )}
+
+          {activeTab==="insights"&&(
+            <div>
+              <Cd style={{padding:18,marginBottom:12}}>
+                <div style={{fontWeight:700,fontSize:13.5,marginBottom:14,color:"var(--text)"}}>💡 Персональные инсайты</div>
+                {history.length===0?<div style={{textAlign:"center",padding:"24px 0",color:"var(--text3)"}}>Пройдите хотя бы один тест для получения инсайтов</div>:<PerformanceInsights history={history} quizzes={quizzes}/>}
+              </Cd>
+              <Cd style={{padding:18,marginBottom:12}}>
+                <div style={{fontWeight:700,fontSize:13.5,marginBottom:14,color:"var(--text)"}}>📊 Сводная статистика</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>
+                  {[["Всего попыток",history.length,"var(--accent)"],["Сдано тестов",history.filter(a=>a.passed).length,"var(--green)"],["Средний балл",`${avgScore}%`,"var(--blue)"],["Лучший балл",`${bestScore}%`,"var(--green)"],["Процент сдачи",`${passRate}%`,passRate>=70?"var(--green)":passRate>=50?"var(--accent)":"var(--red)"],["Серия дней",`${streak} дн.`,"var(--red)"],["Достижений",`${unlocked.length}/${ACHIEVEMENTS.length}`,"var(--accent)"],["Общее время",`${Math.floor(totalTime/60)} мин`,"var(--text2)"]].map(([label,val,col])=>(
+                    <div key={label} style={{background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:9,padding:"11px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span style={{fontSize:12,color:"var(--text3)"}}>{label}</span><span style={{fontSize:14,fontWeight:900,color:col}}>{val}</span>
+                    </div>
+                  ))}
+                </div>
+              </Cd>
+              <Cd style={{padding:18}}>
+                <div style={{fontWeight:700,fontSize:13.5,marginBottom:14,color:"var(--text)"}}>📋 Последние 10 попыток</div>
+                {history.length===0?<div style={{textAlign:"center",color:"var(--text3)",padding:"20px 0"}}>Нет данных</div>:(
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {[...history].sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,10).map((a,i)=>{
+                      const quiz=quizzes.find(q=>q.id===a.quizId);
+                      return(
+                        <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 13px",background:"var(--bg2)",borderRadius:9,border:"1px solid var(--border)"}}>
+                          <span style={{fontSize:15}}>{quiz?.emoji||"📝"}</span>
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{fontWeight:600,color:"var(--text)",fontSize:12.5,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.quizTitle||quiz?.title||"Тест"}</div>
+                            <div style={{fontSize:11,color:"var(--text3)",marginTop:2}}>{new Date(a.date).toLocaleDateString("ru-RU")} · {Math.floor((a.timeSpent||0)/60)} мин</div>
+                          </div>
+                          <div style={{textAlign:"right",flexShrink:0}}>
+                            <div style={{fontWeight:900,fontSize:15,color:a.passed?"var(--green)":a.score>=60?"var(--accent)":"var(--red)"}}>{a.score}%</div>
+                            <div style={{fontSize:10,fontWeight:700,color:a.passed?"var(--green)":"var(--red)"}}>{a.passed?"✓":"✗"}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </Cd>
+            </div>
+          )}
+
+          {activeTab==="achievements"&&(
+            <Cd style={{padding:18}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{fontWeight:700,fontSize:13.5,color:"var(--text)"}}>🏅 Достижения</div>
+                <span style={{fontSize:12,color:"var(--text3)",fontWeight:600}}>{unlocked.length} из {ACHIEVEMENTS.length}</span>
+              </div>
+              <div style={{background:"var(--border)",borderRadius:99,height:8,marginBottom:16}}><div style={{width:`${ACHIEVEMENTS.length?unlocked.length/ACHIEVEMENTS.length*100:0}%`,height:"100%",background:"linear-gradient(90deg,var(--green),var(--accent))",borderRadius:99,transition:"width 1s ease"}}/></div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:8}}>
+                {ACHIEVEMENTS.map(a=>{
+                  const got=unlocked.includes(a.id);
+                  return(
+                    <div key={a.id} style={{background:got?"var(--accent-bg)":"var(--bg3)",border:`1.5px solid ${got?"var(--border2)":"var(--border)"}`,borderRadius:12,padding:"14px 10px",textAlign:"center",opacity:got?1:.45,transition:"all .25s"}}>
+                      <div style={{fontSize:30,marginBottom:6}}>{a.icon}</div>
+                      <div style={{fontWeight:700,color:got?"var(--accent)":"var(--text3)",fontSize:11.5,marginBottom:3}}>{a.title}</div>
+                      <div style={{fontSize:10.5,color:"var(--text3)",lineHeight:1.4}}>{a.desc}</div>
+                      {got&&<div style={{marginTop:6,fontSize:10,color:"var(--green)",fontWeight:700}}>✓ Получено</div>}
+                    </div>
+                  );
+                })}
               </div>
             </Cd>
           )}
-          <Cd style={{padding:18}}>
-            <div style={{fontWeight:700,fontSize:13.5,marginBottom:12,color:"var(--text)",display:"flex",justifyContent:"space-between"}}>🏅 Достижения <span style={{fontSize:12,color:"var(--text3)",fontWeight:500}}>{unlocked.length} из {ACHIEVEMENTS.length}</span></div>
-            <div style={{background:"var(--border)",borderRadius:99,height:7,marginBottom:14}}><div style={{width:`${ACHIEVEMENTS.length?unlocked.length/ACHIEVEMENTS.length*100:0}%`,height:"100%",background:"linear-gradient(90deg,var(--green),var(--accent))",borderRadius:99,transition:"width 1s ease"}}/></div>
-            <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>{ACHIEVEMENTS.map(a=>{const got=unlocked.includes(a.id);return <div key={a.id} title={`${a.title}: ${a.desc}`} style={{background:got?"var(--accent-bg)":"var(--bg3)",border:`1px solid ${got?"var(--border2)":"var(--border)"}`,borderRadius:8,padding:"6px 8px",opacity:got?1:.4,fontSize:20,cursor:"default",transition:"all .2s"}}>{a.icon}</div>;})}</div>
-          </Cd>
         </div>
       );
     }
